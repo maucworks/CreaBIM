@@ -7,8 +7,11 @@
 
 use super::brep;
 use super::{remove_collinear, Importer};
-use creabim_core::{Beam, Column, Element, ElementKind};
-use glam::DMat4;
+use crate::classes::product_class;
+use crate::shape::RevolvedSweep;
+use crate::step_read::Entity;
+use creabim_core::{Beam, Column, Element, ElementKind, Part, parts::Path};
+use glam::{DMat4, DVec3};
 
 /// The property set holding a member's own definition.
 pub(crate) const MEMBER_PSET: &str = "CreaBIM_Element";
@@ -37,7 +40,15 @@ impl Importer<'_> {
             Some(k) => Ok(k),
             None => {
                 let world = self.g.placement(e.arg(5));
-                if COLUMNS.contains(&class) {
+                // a clean revolution becomes a native arc sweep before
+                // the prism analysis, which would only fail on its
+                // curved faces
+                if let Some(swept) = self.g.revolved_sweep(e, &world) {
+                    match swept {
+                        Ok(s) => Ok(self.part_member(id, e, s)),
+                        Err(why) => Err(why),
+                    }
+                } else if COLUMNS.contains(&class) {
                     self.native_column(id, e, &world).map(ElementKind::Column)
                 } else if BEAMS.contains(&class) {
                     self.native_beam(id, e, &world).map(ElementKind::Beam)
@@ -65,6 +76,8 @@ impl Importer<'_> {
             ElementKind::Beam(_) => "Beam",
             ElementKind::Roof(_) => "Roof",
             ElementKind::Stair(_) => "Stair",
+            ElementKind::Part(_) => "Sweep",
+            ElementKind::Railing(_) => "Railing",
             _ => "Railing",
         };
         let element = Element {
@@ -81,6 +94,29 @@ impl Importer<'_> {
         } else {
             self.other_elems.push(element);
         }
+    }
+
+    /// The imported revolution as a native part: the product's IFC class
+    /// and material as the file has them, on the storey under its centre
+    /// of mass, with the arc in that storey's frame.
+    fn part_member(&mut self, id: u64, e: &Entity, s: RevolvedSweep) -> ElementKind {
+        let (level, elev) = self.level_for(id, s.z);
+        let above = |p: DVec3| DVec3::new(p.x, p.y, p.z - elev);
+        let mut part = Part::sweep(
+            level,
+            s.profile,
+            Path::Arc {
+                center: above(s.center),
+                axis: s.axis,
+                start: above(s.start),
+                sweep: s.sweep,
+            },
+        );
+        part.ifc_class = product_class(&e.class)
+            .unwrap_or("IfcBuildingElementProxy")
+            .to_string();
+        part.material = self.material_for(id);
+        ElementKind::Part(part)
     }
 
     /// The member CreaBIM wrote in the element's property set, on the

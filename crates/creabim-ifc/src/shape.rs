@@ -56,6 +56,22 @@ pub(crate) struct Region {
     pub holes: Vec<Vec<DVec2>>,
 }
 
+/// A revolution CreaBIM can build as one native arc sweep: the product's
+/// body a single `IfcRevolvedAreaSolid` whose profile plane holds its
+/// turn axis (a beam bent in a plane). All in world coordinates; `sweep`
+/// in radians, right-handed about `axis`; the profile in the sweep's
+/// frame, `x` to the path's left, `y` along the axis. `z` is the world
+/// height of the profile's centre of mass, for picking the storey.
+#[derive(Debug)]
+pub(crate) struct RevolvedSweep {
+    pub center: DVec3,
+    pub axis: DVec3,
+    pub start: DVec3,
+    pub sweep: f64,
+    pub profile: Vec<DVec2>,
+    pub z: f64,
+}
+
 impl Region {
     fn new(outer: Vec<DVec2>, holes: Vec<Vec<DVec2>>) -> Option<Self> {
         let same = |a: DVec2, b: DVec2| a.distance_squared(b) < 1e-18;
@@ -1046,6 +1062,139 @@ impl<'a> Geo<'a> {
             vector: dir * depth,
         })
     }
+
+/// The product's body as one native arc sweep, or why it is not one.
+/// `None` when the body is not a single `IfcRevolvedAreaSolid`, so the
+/// caller tries its other readings; `Some(Err)` when it is one that stays
+/// a mesh, with why.
+///
+/// The mapping is exact. The file's profile points, placed by the solid's
+/// Position, are re-expressed in the sweep's frame at the arc's start
+/// (`x` to the path's left, `y` along the axis) — a rotation of the
+/// profile plane, so the swept solid is the same revolution the mesh
+/// path builds, rings and all. A placement that mirrors turns a
+/// right-hand revolve about the axis into one about the opposite of it,
+/// so the sweep runs the other way; a placement that scales non-uniformly
+/// would warp the rings, and stays a mesh.
+pub fn revolved_sweep(
+    &mut self,
+    product: &Entity,
+    world: &DMat4,
+) -> Option<Result<RevolvedSweep, String>> {
+    let body = self.body(product)?;
+    let [item] = body.items[..] else {
+        return None;
+    };
+    // the solid, and the placement that carries it into world
+    // coordinates: one mapped item (a type's shape placed per instance)
+    // carries its own origin and operator first
+    let e = self.f.get(item)?;
+    let (solid, pre) = if e.is("IFCMAPPEDITEM") {
+        let source = self.get(e.arg(0))?;
+        let origin = self.axis_placement(source.arg(0));
+        let target = self.transform_operator(e.arg(1));
+        let items: Vec<u64> = self
+            .get(source.arg(1))
+            .map(|r| r.arg(3).refs().collect())
+            .unwrap_or_default();
+        let [only] = items[..] else {
+            return None;
+        };
+        (self.f.get(only)?, *world * target * origin)
+    } else {
+        (e, *world)
+    };
+    if !solid.is("IFCREVOLVEDAREASOLID") {
+        return None;
+    }
+    let pos = pre * self.axis_placement(solid.arg(1));
+    let Some(axis_e) = self.get(solid.arg(2)) else {
+        return Some(Err("has no turn axis".into()));
+    };
+    let a0 = self.point(axis_e.arg(0)).unwrap_or(DVec3::ZERO);
+    let Some(dir) = self.direction(axis_e.arg(1)) else {
+        return Some(Err("has no turn axis".into()));
+    };
+    let angle = solid.arg(3).as_f64().unwrap_or(TAU) * self.angle;
+    let angle = angle.clamp(-TAU, TAU);
+    if angle.abs() < 1e-9 {
+        return Some(Err("turns through no angle".into()));
+    }
+    // the turn axis must lie in the profile's plane, which is the
+    // solid's z = 0
+    if a0.z.abs() > 1e-6 || dir.z.abs() > 1e-6 {
+        return Some(Err(
+            "turns about an axis its profile plane does not hold".into()
+        ));
+    }
+    let regions = self.profile(solid.arg(0));
+    let [region] = &regions[..] else {
+        return Some(Err(if regions.len() > 1 {
+            "sweeps more than one profile".to_string()
+        } else {
+            "has no profile CreaBIM can read".to_string()
+        }));
+    };
+    if !region.holes.is_empty() {
+        return Some(Err("its profile has holes".into()));
+    }
+    // the placement must not warp the rings: one scale, square axes
+    let (ex, ey, ez) = (
+        pos.transform_vector3(DVec3::X),
+        pos.transform_vector3(DVec3::Y),
+        pos.transform_vector3(DVec3::Z),
+    );
+    let s = ex.length();
+    if s < 1e-9
+        || (ey.length() - s).abs() > 1e-6 * s
+        || (ez.length() - s).abs() > 1e-6 * s
+        || ex.dot(ey).abs() > 1e-6 * s * s
+        || ex.dot(ez).abs() > 1e-6 * s * s
+        || ey.dot(ez).abs() > 1e-6 * s * s
+    {
+        return Some(Err("is placed with a scale that warps the turn".into()));
+    }
+    let sign = if ex.cross(ey).dot(ez) < 0.0 { -1.0 } else { 1.0 };
+    let sweep = angle * sign;
+    let center = pos.transform_point3(a0);
+    let axis = pos.transform_vector3(dir).normalize_or(DVec3::Y);
+    // the arc starts at the profile's centre of mass, so the profile
+    // rides centred on the path
+    let n = region.outer.len() as f64;
+    let c2 = region.outer.iter().fold(DVec2::ZERO, |a, p| a + *p) / n;
+    let wc = pos.transform_point3(c2.extend(0.0));
+    let out = wc - center;
+    let radial = out - axis * out.dot(axis);
+    let radius = radial.length();
+    if radius < 1e-6 {
+        return Some(Err("turns about its own profile".into()));
+    }
+    let u0 = radial / radius;
+    let start = center + u0 * radius;
+    // left of the travel: inwards on the arc, turned round when the
+    // sweep runs the other way
+    let across = -u0 * sweep.signum();
+    let mut profile: Vec<DVec2> = region
+        .outer
+        .iter()
+        .map(|p| {
+            let d = pos.transform_point3(p.extend(0.0)) - start;
+            DVec2::new(d.dot(across), d.dot(axis))
+        })
+        .collect();
+    // stored counter-clockwise, like an authored profile
+    if creabim_core::polygon::signed_area2(&profile) < 0.0 {
+        profile.reverse();
+    }
+    Some(Ok(RevolvedSweep {
+        center,
+        axis,
+        start,
+        sweep,
+        profile,
+        z: wc.z,
+    }))
+}
 }
 
 /// A right-handed frame at `origin` with z along `z` and x towards `x`, as
@@ -1264,25 +1413,30 @@ fn revolve_mesh(r: &Region, a0: DVec3, dir: DVec3, angle: f64, pos: &DMat4, out:
         }
     }
     if !full {
-        let start: Vec<DVec3> = r.outer.iter().map(|&p| rot(p, 0)).collect();
-        let end: Vec<DVec3> = r.outer.iter().rev().map(|&p| rot(p, steps)).collect();
-        let sh: Vec<Vec<DVec3>> = r
+        let mut start: Vec<DVec3> = r.outer.iter().map(|&p| rot(p, 0)).collect();
+        let mut end: Vec<DVec3> = r.outer.iter().rev().map(|&p| rot(p, steps)).collect();
+        let mut sh: Vec<Vec<DVec3>> = r
             .holes
             .iter()
             .map(|h| h.iter().map(|&p| rot(p, 0)).collect())
             .collect();
-        let eh: Vec<Vec<DVec3>> = r
+        let mut eh: Vec<Vec<DVec3>> = r
             .holes
             .iter()
             .map(|h| h.iter().rev().map(|&p| rot(p, steps)).collect())
             .collect();
+        // a negative angle turns the solid to the other side of each cap
+        // ring, so the caps face round with the sides (which `face` turns
+        // above); without this the caps point into the solid
         if flip {
-            add_face(out, &end, &eh);
-            add_face(out, &start, &sh);
-        } else {
-            add_face(out, &start, &sh);
-            add_face(out, &end, &eh);
+            start.reverse();
+            end.reverse();
+            for h in sh.iter_mut().chain(eh.iter_mut()) {
+                h.reverse();
+            }
         }
+        add_face(out, &start, &sh);
+        add_face(out, &end, &eh);
     }
 }
 
@@ -1379,6 +1533,148 @@ mod tests {
         let (lo, hi) = crate::tess::bounds(m.vertices.iter().copied()).unwrap();
         assert!((lo - DVec3::new(10.0, 5.0, 2.0)).length() < 1e-9, "{lo}");
         assert!((hi - DVec3::new(12.0, 7.0, 4.0)).length() < 1e-9, "{hi}");
+    }
+
+    /// A rectangular section bent over an arc, as a product: the shape
+    /// both readings must agree on.
+    fn bent_beam() -> StepFile {
+        geo(
+            "#1=IFCCARTESIANPOINTLIST2D(((5.,-0.15),(5.3,-0.15),(5.3,0.15),(5.,0.15)));\
+            #2=IFCINDEXEDPOLYCURVE(#1,(IFCLINEINDEX((1,2,3,4,1))),$);\
+            #3=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#2);\
+            #4=IFCCARTESIANPOINT((0.,0.,0.));\
+            #5=IFCDIRECTION((0.,1.,0.));#6=IFCAXIS1PLACEMENT(#4,#5);\
+            #7=IFCCARTESIANPOINT((2.,1.,0.5));#8=IFCDIRECTION((0.,0.,1.));\
+            #9=IFCAXIS2PLACEMENT3D(#7,#8,$);\
+            #10=IFCREVOLVEDAREASOLID(#3,#9,#6,1.2);\
+            #11=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#10));\
+            #12=IFCPRODUCTDEFINITIONSHAPE($,$,(#11));\
+            #15=IFCAXIS2PLACEMENT3D(#4,$,$);#13=IFCLOCALPLACEMENT($,#15);\
+            #14=IFCBEAM('0hUYrQRzX4jeuyugCUcdLX',$,'bent',$,$,#13,#12,$,$);",
+        )
+    }
+
+    #[test]
+    fn a_revolved_solid_maps_to_the_sweep_of_the_same_solid() {
+        let f = bent_beam();
+        let mut g = Geo::new(&f, 1.0, 1.0);
+        let world = g.placement(&Value::Ref(13));
+        // the mesh path's reading of the file
+        let mut m = EditMesh::default();
+        assert!(g.item(10, &DMat4::IDENTITY, &mut m, 0));
+        crate::tess::weld(&mut m, 1e-6);
+        // the sweep path's reading
+        let product = g.f.get(14).unwrap();
+        let s = g
+            .revolved_sweep(product, &world)
+            .expect("mapped")
+            .expect("sweepable");
+        assert!((s.sweep - 1.2).abs() < 1e-12);
+        assert!((s.axis - DVec3::Y).length() < 1e-12);
+        assert!((s.center - DVec3::new(2.0, 1.0, 0.5)).length() < 1e-12);
+        // the profile rides centred: a 0.3 x 0.3 section
+        let (lo, hi) = s.profile.iter().fold(
+            (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)),
+            |(a, b), p| (a.min(*p), b.max(*p)),
+        );
+        assert!((lo.x + 0.15).abs() < 1e-9 && (hi.x - 0.15).abs() < 1e-9, "{lo} {hi}");
+        assert!((lo.y + 0.15).abs() < 1e-9 && (hi.y - 0.15).abs() < 1e-9, "{lo} {hi}");
+        // and its swept solid is the same revolution, rings and all: the
+        // two tessellations differ only in how finely they sample the arc.
+        // Ring centres sit exactly on the arc; the open end rings ride a
+        // chord-direction frame (sweep_mesh mitres only interior rings),
+        // tilted half a segment angle off the true radial plane, so the
+        // bounds agree to profile half-width times segment angle.
+        let (pts, closed) = creabim_core::parts::arc_path(s.center, s.axis, s.start, s.sweep);
+        let swept = creabim_geom::parts::sweep_mesh_on(&s.profile, &pts, closed, s.axis);
+        assert!((m.volume() - swept.volume()).abs() < 0.005 * swept.volume());
+        let slop = 0.15 * (s.sweep.abs() / pts.len() as f64) + 1e-3;
+        let (alo, ahi) = crate::tess::bounds(m.vertices.iter().copied()).unwrap();
+        let (blo, bhi) = crate::tess::bounds(
+            swept
+                .positions
+                .iter()
+                .map(|p| DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64)),
+        )
+        .unwrap();
+        assert!((alo - blo).length() < slop, "{alo} {blo}");
+        assert!((ahi - bhi).length() < slop, "{ahi} {bhi}");
+    }
+
+    #[test]
+    fn a_clockwise_revolve_maps_to_a_negative_sweep() {
+        // the same bent beam turning the other way: the sweep runs
+        // right-handed negative about the axis, and the solid matches
+        let f = geo(
+            "#1=IFCCARTESIANPOINTLIST2D(((5.,-0.15),(5.3,-0.15),(5.3,0.15),(5.,0.15)));\
+            #2=IFCINDEXEDPOLYCURVE(#1,(IFCLINEINDEX((1,2,3,4,1))),$);\
+            #3=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#2);\
+            #4=IFCCARTESIANPOINT((0.,0.,0.));\
+            #5=IFCDIRECTION((0.,1.,0.));#6=IFCAXIS1PLACEMENT(#4,#5);\
+            #7=IFCCARTESIANPOINT((2.,1.,0.5));#8=IFCDIRECTION((0.,0.,1.));\
+            #9=IFCAXIS2PLACEMENT3D(#7,#8,$);\
+            #10=IFCREVOLVEDAREASOLID(#3,#9,#6,-1.2);\
+            #11=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#10));\
+            #12=IFCPRODUCTDEFINITIONSHAPE($,$,(#11));\
+            #15=IFCAXIS2PLACEMENT3D(#4,$,$);#13=IFCLOCALPLACEMENT($,#15);\
+            #14=IFCBEAM('0hUYrQRzX4jeuyugCUcdLX',$,'bent',$,$,#13,#12,$,$);",
+        );
+        let mut g = Geo::new(&f, 1.0, 1.0);
+        let world = g.placement(&Value::Ref(13));
+        let product = g.f.get(14).unwrap();
+        let s = g
+            .revolved_sweep(product, &world)
+            .expect("mapped")
+            .expect("sweepable");
+        assert!((s.sweep + 1.2).abs() < 1e-12);
+        let mut m = EditMesh::default();
+        assert!(g.item(10, &DMat4::IDENTITY, &mut m, 0));
+        crate::tess::weld(&mut m, 1e-6);
+        let (pts, closed) = creabim_core::parts::arc_path(s.center, s.axis, s.start, s.sweep);
+        let swept = creabim_geom::parts::sweep_mesh_on(&s.profile, &pts, closed, s.axis);
+        // signed volumes: the mesh path flips its winding for a negative
+        // angle, so the magnitudes agree
+        assert!((m.volume().abs() - swept.volume().abs()).abs() < 0.005 * swept.volume().abs());
+    }
+
+    #[test]
+    fn a_revolved_solid_off_the_sweepable_config_stays_a_mesh() {        // the turn axis off the profile plane: a0 with a z, a tilted dir.
+        // Each solid wrapped in a beam product, as revolved_sweep takes one.
+        for axis1 in [
+            "#4=IFCCARTESIANPOINT((0.,0.,2.));#5=IFCDIRECTION((0.,1.,0.));",
+            "#4=IFCCARTESIANPOINT((0.,0.,0.));#5=IFCDIRECTION((0.5,1.,0.5));",
+        ] {
+            let f = geo(&format!(
+                "#1=IFCCARTESIANPOINTLIST2D(((5.,-0.15),(5.3,-0.15),(5.3,0.15),(5.,0.15)));\
+                #2=IFCINDEXEDPOLYCURVE(#1,(IFCLINEINDEX((1,2,3,4,1))),$);\
+                #3=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#2);\
+                {axis1}#6=IFCAXIS1PLACEMENT(#4,#5);\
+                #7=IFCCARTESIANPOINT((0.,0.,0.));#9=IFCAXIS2PLACEMENT3D(#7,$,$);\
+                #10=IFCREVOLVEDAREASOLID(#3,#9,#6,1.2);\
+                #11=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#10));\
+                #12=IFCPRODUCTDEFINITIONSHAPE($,$,(#11));\
+                #15=IFCAXIS2PLACEMENT3D(#7,$,$);#13=IFCLOCALPLACEMENT($,#15);\
+                #14=IFCBEAM('0hUYrQRzX4jeuyugCUcdLX',$,'off',$,$,#13,#12,$,$);"
+            ));
+            let mut g = Geo::new(&f, 1.0, 1.0);
+            let product = g.f.get(14).unwrap();
+            let swept = g
+                .revolved_sweep(product, &DMat4::IDENTITY)
+                .expect("a single revolved solid");
+            assert!(swept.is_err(), "expected a why, got {swept:?}");
+        }
+        // a body of several items, or a different solid: no reading at all
+        let f = geo(
+            "#9=IFCAXIS2PLACEMENT3D($,$,$);\
+            #11=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#10,#10));\
+            #12=IFCPRODUCTDEFINITIONSHAPE($,$,(#11));\
+            #15=IFCAXIS2PLACEMENT3D($,$,$);#13=IFCLOCALPLACEMENT($,#15);\
+            #14=IFCBEAM('0hUYrQRzX4jeuyugCUcdLX',$,'two',$,$,#13,#12,$,$);",
+        );
+        let mut g = Geo::new(&f, 1.0, 1.0);
+        let product = g.f.get(14).unwrap();
+        let world = g.placement(&Value::Ref(13));
+        assert!(g.revolved_sweep(product, &world).is_none());
     }
 
     #[test]
