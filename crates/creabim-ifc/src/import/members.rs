@@ -7,11 +7,10 @@
 
 use super::brep;
 use super::{remove_collinear, Importer};
-use crate::classes::product_class;
 use crate::shape::RevolvedSweep;
 use crate::step_read::Entity;
-use creabim_core::{Beam, Column, Element, ElementKind, Part, parts::Path};
-use glam::{DMat4, DVec3};
+use creabim_core::{Beam, Column, Element, ElementKind};
+use glam::DMat4;
 
 /// The property set holding a member's own definition.
 pub(crate) const MEMBER_PSET: &str = "CreaBIM_Element";
@@ -96,27 +95,9 @@ impl Importer<'_> {
         }
     }
 
-    /// The imported revolution as a native part: the product's IFC class
-    /// and material as the file has them, on the storey under its centre
-    /// of mass, with the arc in that storey's frame.
+    /// The imported revolution as a native part (shared construction).
     fn part_member(&mut self, id: u64, e: &Entity, s: RevolvedSweep) -> ElementKind {
-        let (level, elev) = self.level_for(id, s.z);
-        let above = |p: DVec3| DVec3::new(p.x, p.y, p.z - elev);
-        let mut part = Part::sweep(
-            level,
-            s.profile,
-            Path::Arc {
-                center: above(s.center),
-                axis: s.axis,
-                start: above(s.start),
-                sweep: s.sweep,
-            },
-        );
-        part.ifc_class = product_class(&e.class)
-            .unwrap_or("IfcBuildingElementProxy")
-            .to_string();
-        part.material = self.material_for(id);
-        ElementKind::Part(part)
+        self.swept_part(id, e, s)
     }
 
     /// The member CreaBIM wrote in the element's property set, on the

@@ -13,9 +13,10 @@ use crate::classes::product_class;
 use crate::shape::{Geo, Warnings};
 use crate::step_read::{parse, Entity, StepError, StepFile, Value};
 use crate::tess::{area2, bounds, merge_coplanar, weld};
+use crate::shape::RevolvedSweep;
 use creabim_core::{
-    Document, EditMesh, Element, ElementId, ElementKind, FreeMesh, Grid, Hatch, Level,
-    LocationLine, Material, Model, Opening, OpeningKind, Slab, Transaction, Wall,
+    parts::Path, Document, EditMesh, Element, ElementId, ElementKind, FreeMesh, Grid, Hatch,
+    Level, LocationLine, Material, Model, Opening, OpeningKind, Part, Slab, Transaction, Wall,
 };
 use glam::{DMat4, DVec2, DVec3};
 use std::collections::{HashMap, HashSet};
@@ -419,7 +420,9 @@ impl<'a> Importer<'a> {
             .collect();
         rest.sort_unstable();
         for id in rest {
-            self.import_free_mesh(id);
+            if !self.import_revolved_part(id) {
+                self.import_free_mesh(id);
+            }
         }
         // the rest of the file's layer sets (a roof's, unused ones) come
         // along as assemblies, as its materials do
@@ -1235,6 +1238,67 @@ impl<'a> Importer<'a> {
             Some(name) => format!("{class} '{name}' ({guid})"),
             None => format!("{class} ({guid})"),
         }
+    }
+
+    /// The imported revolution as a native part: the product's IFC class
+    /// and material as the file has them, on the storey under its centre
+    /// of mass, with the arc in that storey's frame.
+    pub(super) fn swept_part(&mut self, id: u64, e: &Entity, s: RevolvedSweep) -> ElementKind {
+        let (level, elev) = self.level_for(id, s.z);
+        let above = |p: DVec3| DVec3::new(p.x, p.y, p.z - elev);
+        let mut part = Part::sweep(
+            level,
+            s.profile,
+            Path::Arc {
+                center: above(s.center),
+                axis: s.axis,
+                start: above(s.start),
+                sweep: s.sweep,
+            },
+        );
+        part.ifc_class = product_class(&e.class)
+            .unwrap_or("IfcBuildingElementProxy")
+            .to_string();
+        part.material = self.material_for(id);
+        ElementKind::Part(part)
+    }
+
+    /// A product of any other class whose body is one clean revolution:
+    /// a native arc sweep keeping its IFC class. `false` when it is no
+    /// such product, so the caller meshes it (recording why, when it is
+    /// one that stays a mesh).
+    fn import_revolved_part(&mut self, id: u64) -> bool {
+        let Some(e) = self.f.get(id) else {
+            return false;
+        };
+        if self.written_as_mesh(id) {
+            return false;
+        }
+        let world = self.g.placement(e.arg(5));
+        let swept = match self.g.revolved_sweep(e, &world) {
+            Some(Ok(s)) => s,
+            Some(Err(why)) => {
+                if self.g.body(e).is_some() {
+                    let body = self.body_kind(e);
+                    self.mesh_reason
+                        .insert(id, format!("is {body} that {why}; imported as a mesh"));
+                }
+                return false;
+            }
+            None => return false,
+        };
+        self.done.insert(id);
+        let kind = self.swept_part(id, e, swept);
+        let eid = self.new_id(e);
+        self.other_elems.push(Element {
+            mark: None,
+            source: None,
+            of_type: self.type_ref(id),
+            id: eid,
+            name: Self::name(e, "Sweep"),
+            kind,
+        });
+        true
     }
 
     /// A note about one element, counted under `group` and listed as the
