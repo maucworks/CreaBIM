@@ -804,16 +804,20 @@ fn part_fields(ui: &mut egui::Ui, model: &Model, p: &mut Part) -> &'static str {
                     }
                     // the radius, from where the arc starts
                     let out = *start - *center;
-                    let radial = out - axis.normalize_or(DVec3::Z) * out.dot(axis.normalize_or(DVec3::Z));
-                    weak(ui, format!(
-                        "Turns {} around a radius of {}.",
-                        if sweep.abs() >= std::f64::consts::TAU - 1e-6 {
-                            "a full circle".to_string()
-                        } else {
-                            format!("{:.1}°", deg.abs())
-                        },
-                        crate::units::len(radial.length()),
-                    ));
+                    let radial =
+                        out - axis.normalize_or(DVec3::Z) * out.dot(axis.normalize_or(DVec3::Z));
+                    weak(
+                        ui,
+                        format!(
+                            "Turns {} around a radius of {}.",
+                            if sweep.abs() >= std::f64::consts::TAU - 1e-6 {
+                                "a full circle".to_string()
+                            } else {
+                                format!("{:.1}°", deg.abs())
+                            },
+                            crate::units::len(radial.length()),
+                        ),
+                    );
                 }
             }
         }

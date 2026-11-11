@@ -177,7 +177,6 @@ pub fn arc_path(center: DVec3, axis: DVec3, start: DVec3, sweep: f64) -> (Vec<DV
     (pts, closed)
 }
 
-
 /// Which edge of a wall a sweep follows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WallEdge {
@@ -338,7 +337,9 @@ impl Part {
                         sweep,
                     } => {
                         if !(center.is_finite() && start.is_finite() && sweep.is_finite()) {
-                            return Err("a sweep's arc needs a finite centre, start and angle".into());
+                            return Err(
+                                "a sweep's arc needs a finite centre, start and angle".into()
+                            );
                         }
                         if !axis.is_finite() || axis.length() < 1e-9 {
                             return Err("a sweep's arc needs an axis direction".into());
@@ -380,10 +381,7 @@ impl Part {
             } => {
                 let z = crate::members::elevation(model, self.level);
                 let (pts, closed) = arc_path(*center, *axis, *start, *sweep);
-                Some((
-                    pts.into_iter().map(|p| p + DVec3::Z * z).collect(),
-                    closed,
-                ))
+                Some((pts.into_iter().map(|p| p + DVec3::Z * z).collect(), closed))
             }
             Path::Wall {
                 wall,
@@ -1022,7 +1020,10 @@ mod tests {
         let (center, axis, start) = arc();
         let (pts, closed) = arc_path(center, axis, start, FRAC_PI_2);
         assert!(!closed);
-        assert_eq!(pts.last().unwrap(), &arc_point(center, axis, start, FRAC_PI_2));
+        assert_eq!(
+            pts.last().unwrap(),
+            &arc_point(center, axis, start, FRAC_PI_2)
+        );
     }
 
     #[test]
@@ -1121,7 +1122,13 @@ mod tests {
         )
         .unwrap();
         let Form::Sweep {
-            path: Path::Arc { center, axis, start, sweep },
+            path:
+                Path::Arc {
+                    center,
+                    axis,
+                    start,
+                    sweep,
+                },
             ..
         } = &p.form
         else {
@@ -1149,7 +1156,13 @@ mod tests {
         .unwrap();
         assert!(matches!(
             &p.form,
-            Form::Sweep { path: Path::Points { normal: Some(_), .. }, .. }
+            Form::Sweep {
+                path: Path::Points {
+                    normal: Some(_),
+                    ..
+                },
+                ..
+            }
         ));
         assert!(p.validate().is_ok());
     }

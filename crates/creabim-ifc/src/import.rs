@@ -10,13 +10,13 @@
 //! round-trips through IFC keeps its identity.
 
 use crate::classes::product_class;
+use crate::shape::RevolvedSweep;
 use crate::shape::{Geo, Warnings};
 use crate::step_read::{parse, Entity, StepError, StepFile, Value};
 use crate::tess::{area2, bounds, merge_coplanar, weld};
-use crate::shape::RevolvedSweep;
 use creabim_core::{
-    parts::Path, Document, EditMesh, Element, ElementId, ElementKind, FreeMesh, Grid, Hatch,
-    Level, LocationLine, Material, Model, Opening, OpeningKind, Part, Slab, Transaction, Wall,
+    parts::Path, Document, EditMesh, Element, ElementId, ElementKind, FreeMesh, Grid, Hatch, Level,
+    LocationLine, Material, Model, Opening, OpeningKind, Part, Slab, Transaction, Wall,
 };
 use glam::{DMat4, DVec2, DVec3};
 use std::collections::{HashMap, HashSet};

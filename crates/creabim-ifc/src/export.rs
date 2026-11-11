@@ -817,9 +817,8 @@ pub fn export_ifc4(model: &Model, opts: &ExportOptions) -> String {
                                     },
                             } = &p.form
                             {
-                                param = c.revolved_solid(
-                                    profile, *center, *axis, *start, *sweep, z0,
-                                );
+                                param =
+                                    c.revolved_solid(profile, *center, *axis, *start, *sweep, z0);
                             }
                         }
                     }
