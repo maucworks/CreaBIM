@@ -222,6 +222,72 @@ impl Ctx {
             format!("{prof},{position},{},{}", self.z_axis, real(depth)),
         )
     }
+
+    /// An arc sweep as the revolution it is, in the storey's frame (`z0`
+    /// is the storey's elevation): `None` when the arc is degenerate, so
+    /// the caller falls back to the shape as built, tessellated.
+    ///
+    /// The Position sits at the arc's centre with X along the radius to
+    /// the arc's start and Y along the turn axis, so the axis line lies
+    /// in the profile plane through the local origin along local Y —
+    /// the configuration `revolved_sweep` reads back. The profile rides
+    /// centred on the path: mirrored in x for a negative sweep, offset
+    /// by the radius, stored counter-clockwise like an authored profile.
+    fn revolved_solid(
+        &mut self,
+        profile: &[DVec2],
+        center: DVec3,
+        axis: DVec3,
+        start: DVec3,
+        sweep: f64,
+        z0: f64,
+    ) -> Option<Ref> {
+        if profile.len() < 3
+            || profile.iter().any(|p| !p.is_finite())
+            || !(sweep.abs() > 1e-9 && sweep.abs() <= std::f64::consts::TAU + 1e-9)
+        {
+            return None;
+        }
+        let axis = axis.try_normalize()?;
+        let center = DVec3::new(center.x, center.y, center.z - z0);
+        let start = DVec3::new(start.x, start.y, start.z - z0);
+        let out = start - center;
+        let radial = out - axis * out.dot(axis);
+        let radius = radial.length();
+        if radius < 1e-6 {
+            return None;
+        }
+        let x = radial / radius;
+        let z = x.cross(axis);
+        let s = sweep.signum();
+        let mut pts: Vec<DVec2> = profile
+            .iter()
+            .map(|q| DVec2::new(-s * q.x + radius, q.y))
+            .collect();
+        if creabim_core::polygon::signed_area2(&pts) < 0.0 {
+            pts.reverse();
+        }
+        let mut refs: Vec<Ref> = pts
+            .iter()
+            .map(|p| self.w.add("IFCCARTESIANPOINT", point2(p.x, p.y)))
+            .collect();
+        refs.push(refs[0]);
+        let poly = self.w.add("IFCPOLYLINE", list(&refs));
+        let prof = self
+            .w
+            .add("IFCARBITRARYCLOSEDPROFILEDEF", format!(".AREA.,$,{poly}"));
+        let pos = self.placement3d(center, Some(z), Some(x));
+        let a0 = self.w.add("IFCCARTESIANPOINT", point3(0.0, 0.0, 0.0));
+        let y = self.dir(DVec3::Y);
+        let axis1 = self.w.add("IFCAXIS1PLACEMENT", format!("{a0},{y}"));
+        Some(self.w.add(
+            "IFCREVOLVEDAREASOLID",
+            format!(
+                "{prof},{pos},{axis1},{}",
+                real(sweep.clamp(-std::f64::consts::TAU, std::f64::consts::TAU))
+            ),
+        ))
+    }
 }
 
 /// Export the model as an IFC4 file.
@@ -732,16 +798,45 @@ pub fn export_ifc4(model: &Model, opts: &ExportOptions) -> String {
                 let Some(&(_, spl)) = level.and_then(|l| storeys.get(&l)) else {
                     continue;
                 };
-                // the shape as built, tessellated in the storey's frame
-                let mesh = match cut {
-                    Some(m) => Some(m.clone()),
-                    None => creabim_geom::members::member_mesh(model, e).map(|m| m.0),
-                };
-                let Some(mesh) = mesh else { continue };
                 let pl = c.local_placement(Some(spl), DVec3::ZERO, None);
                 let z0 = elevation(level);
-                let fs = tessellate(&mut c, &mesh, |p| p - DVec3::Z * z0);
-                let shape = c.shape("Tessellation", &[fs]);
+                // an arc sweep goes out as the revolution it is; cut with
+                // openings, or degenerate, it goes out tessellated as built
+                let mut param: Option<Ref> = None;
+                if cut.is_none() {
+                    if let ElementKind::Part(p) = k {
+                        if !p.void {
+                            if let creabim_core::parts::Form::Sweep {
+                                profile,
+                                path:
+                                    creabim_core::parts::Path::Arc {
+                                        center,
+                                        axis,
+                                        start,
+                                        sweep,
+                                    },
+                            } = &p.form
+                            {
+                                param = c.revolved_solid(
+                                    profile, *center, *axis, *start, *sweep, z0,
+                                );
+                            }
+                        }
+                    }
+                }
+                let shape = match param {
+                    Some(solid) => c.shape("SweptSolid", &[solid]),
+                    None => {
+                        // the shape as built, tessellated in the storey's frame
+                        let mesh = match cut {
+                            Some(m) => Some(m.clone()),
+                            None => creabim_geom::members::member_mesh(model, e).map(|m| m.0),
+                        };
+                        let Some(mesh) = mesh else { continue };
+                        let fs = tessellate(&mut c, &mesh, |p| p - DVec3::Z * z0);
+                        c.shape("Tessellation", &[fs])
+                    }
+                };
                 let (class, tail) = match k {
                     ElementKind::Part(_) | ElementKind::Site(_) => part_entity(e),
                     _ => {
