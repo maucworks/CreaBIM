@@ -10,13 +10,12 @@
 //! round-trips through IFC keeps its identity.
 
 use crate::classes::product_class;
-use crate::shape::RevolvedSweep;
-use crate::shape::{Geo, Warnings};
+use crate::shape::{ExtrudedPart, Geo, RevolvedSweep, Warnings};
 use crate::step_read::{parse, Entity, StepError, StepFile, Value};
 use crate::tess::{area2, bounds, merge_coplanar, weld};
 use creabim_core::{
     parts::Path, Document, EditMesh, Element, ElementId, ElementKind, FreeMesh, Grid, Hatch, Level,
-    LocationLine, Material, Model, Opening, OpeningKind, Part, Slab, Transaction, Wall,
+    LocationLine, Material, Model, Opening, OpeningKind, Part, Slab, Transaction, Wall, Workplane,
 };
 use glam::{DMat4, DVec2, DVec3};
 use std::collections::{HashMap, HashSet};
@@ -420,7 +419,7 @@ impl<'a> Importer<'a> {
             .collect();
         rest.sort_unstable();
         for id in rest {
-            if !self.import_revolved_part(id) {
+            if !self.import_native_part(id) {
                 self.import_free_mesh(id);
             }
         }
@@ -1263,11 +1262,11 @@ impl<'a> Importer<'a> {
         ElementKind::Part(part)
     }
 
-    /// A product of any other class whose body is one clean revolution:
-    /// a native arc sweep keeping its IFC class. `false` when it is no
-    /// such product, so the caller meshes it (recording why, when it is
-    /// one that stays a mesh).
-    fn import_revolved_part(&mut self, id: u64) -> bool {
+    /// A product of any other class whose body is one clean revolution
+    /// or one clean extrusion: a native sweep or extrusion keeping its
+    /// IFC class. `false` when it is neither, so the caller meshes it
+    /// (recording why, when it is one that stays a mesh).
+    fn import_native_part(&mut self, id: u64) -> bool {
         let Some(e) = self.f.get(id) else {
             return false;
         };
@@ -1275,20 +1274,84 @@ impl<'a> Importer<'a> {
             return false;
         }
         let world = self.g.placement(e.arg(5));
-        let swept = match self.g.revolved_sweep(e, &world) {
-            Some(Ok(s)) => s,
-            Some(Err(why)) => {
-                if self.g.body(e).is_some() {
-                    let body = self.body_kind(e);
-                    self.mesh_reason
-                        .insert(id, format!("is {body} that {why}; imported as a mesh"));
-                }
-                return false;
+        let mut why = None;
+        match self.g.revolved_sweep(e, &world) {
+            Some(Ok(s)) => {
+                let kind = self.swept_part(id, e, s);
+                return self.push_part(id, e, kind);
             }
-            None => return false,
+            Some(Err(w)) => why = Some(w),
+            None => {}
+        }
+        match self.g.extruded_part(e, &world) {
+            Some(Ok(s)) => {
+                let kind = self.extruded_part_ctor(id, e, s);
+                return self.push_part(id, e, kind);
+            }
+            Some(Err(w)) => why = Some(w),
+            None => {}
+        }
+        if let Some(w) = why {
+            if self.g.body(e).is_some() {
+                let body = self.body_kind(e);
+                self.mesh_reason
+                    .insert(id, format!("is {body} that {w}; imported as a mesh"));
+            }
+        }
+        false
+    }
+
+    /// The imported extrusion as a native part: the product's IFC class
+    /// and material as the file has them, on the storey under its foot,
+    /// upright in plan or drawn on its plane.
+    pub(super) fn extruded_part_ctor(
+        &mut self,
+        id: u64,
+        e: &Entity,
+        mut s: ExtrudedPart,
+    ) -> ElementKind {
+        use creabim_core::parts::Form;
+        let (level, elev) = self.level_for(id, s.z);
+        // stored counter-clockwise, like an authored outline
+        if creabim_core::polygon::signed_area2(&s.outline) < 0.0 {
+            s.outline.reverse();
+        }
+        let form = if let Some((origin, x, y)) = s.plane {
+            Form::Extrusion {
+                outline: s.outline,
+                holes: vec![],
+                base: s.base,
+                height: s.height,
+                plane: Some(Workplane {
+                    origin: DVec3::new(origin.x, origin.y, origin.z - elev),
+                    x,
+                    y,
+                }),
+            }
+        } else {
+            Form::Extrusion {
+                outline: s.outline,
+                holes: vec![],
+                base: s.base - elev,
+                height: s.height,
+                plane: None,
+            }
         };
+        ElementKind::Part(Part {
+            level,
+            form,
+            void: false,
+            material: self.material_for(id),
+            ifc_class: product_class(&e.class)
+                .unwrap_or("IfcBuildingElementProxy")
+                .to_string(),
+            profile: None,
+        })
+    }
+
+    /// A native part pushed as read: marked done, under its own id.
+    fn push_part(&mut self, id: u64, e: &Entity, kind: ElementKind) -> bool {
         self.done.insert(id);
-        let kind = self.swept_part(id, e, swept);
         let eid = self.new_id(e);
         self.other_elems.push(Element {
             mark: None,

@@ -1076,34 +1076,58 @@ impl<'a> Geo<'a> {
     /// right-hand revolve about the axis into one about the opposite of it,
     /// so the sweep runs the other way; a placement that scales non-uniformly
     /// would warp the rings, and stays a mesh.
+    /// The product's body as one solid and the placement carrying it
+    /// into world coordinates, or `None` when it is not one solid.
+    /// Sees through one mapped item (a type's shape placed per instance,
+    /// silently) and through non-`UNION` booleans with the mesh path's
+    /// warning, one count per unwrap — the mesh path imports those operands
+    /// first-only too, so a native reading is never less faithful. A
+    /// `UNION` merges both operands in the mesh and stays a mesh here.
+    fn native_solid(&mut self, product: &Entity, world: &DMat4) -> Option<(&'a Entity, DMat4)> {
+        let body = self.body(product)?;
+        let [item] = body.items[..] else {
+            return None;
+        };
+        let mut e = self.f.get(item)?;
+        let mut pre = *world;
+        for _ in 0..4 {
+            if e.is("IFCMAPPEDITEM") {
+                let source = self.get(e.arg(0))?;
+                let origin = self.axis_placement(source.arg(0));
+                let target = self.transform_operator(e.arg(1));
+                let items: Vec<u64> = self
+                    .get(source.arg(1))
+                    .map(|r| r.arg(3).refs().collect())
+                    .unwrap_or_default();
+                let [only] = items[..] else {
+                    return None;
+                };
+                e = self.f.get(only)?;
+                pre = pre * target * origin;
+            } else if e.is("IFCBOOLEANRESULT") || e.is("IFCBOOLEANCLIPPINGRESULT") {
+                if e.arg(0).as_enum() == Some("UNION") {
+                    return None;
+                }
+                self.warnings.add(format!(
+                    "boolean {} ignored: only the first operand is imported",
+                    e.arg(0).as_enum().unwrap_or("operation").to_lowercase()
+                ));
+                e = self.get(e.arg(1))?;
+                // the clip's placement is the product's own: `pre` stands
+            } else {
+                return Some((e, pre));
+            }
+        }
+        None
+    }
+
     pub fn revolved_sweep(
         &mut self,
         product: &Entity,
         world: &DMat4,
     ) -> Option<Result<RevolvedSweep, String>> {
-        let body = self.body(product)?;
-        let [item] = body.items[..] else {
-            return None;
-        };
-        // the solid, and the placement that carries it into world
-        // coordinates: one mapped item (a type's shape placed per instance)
-        // carries its own origin and operator first
-        let e = self.f.get(item)?;
-        let (solid, pre) = if e.is("IFCMAPPEDITEM") {
-            let source = self.get(e.arg(0))?;
-            let origin = self.axis_placement(source.arg(0));
-            let target = self.transform_operator(e.arg(1));
-            let items: Vec<u64> = self
-                .get(source.arg(1))
-                .map(|r| r.arg(3).refs().collect())
-                .unwrap_or_default();
-            let [only] = items[..] else {
-                return None;
-            };
-            (self.f.get(only)?, *world * target * origin)
-        } else {
-            (e, *world)
-        };
+        // the solid, and the placement that carries it into world coordinates
+        let (solid, pre) = self.native_solid(product, world)?;
         if !solid.is("IFCREVOLVEDAREASOLID") {
             return None;
         }
@@ -1197,6 +1221,109 @@ impl<'a> Geo<'a> {
             sweep,
             profile,
             z: wc.z,
+        }))
+    }
+
+    /// The product's body as one native extrusion, or why it is not one.
+    /// `None` when the body is not a single `IfcExtrudedAreaSolid`, so the
+    /// caller tries its other readings; `Some(Err)` when it is one that
+    /// stays a mesh, with why. Reads through the same wrappers as
+    /// [`Geo::revolved_sweep`]: a clipped extrusion comes back unclipped
+    /// under the boolean-ignored warning.
+    pub fn extruded_part(
+        &mut self,
+        product: &Entity,
+        world: &DMat4,
+    ) -> Option<Result<ExtrudedPart, String>> {
+        let (solid, pre) = self.native_solid(product, world)?;
+        if !solid.class.starts_with("IFCEXTRUDEDAREASOLID") {
+            return None;
+        }
+        if solid.is("IFCEXTRUDEDAREASOLIDTAPERED") {
+            return Some(Err("tapers along its depth".into()));
+        }
+        let regions = self.profile(solid.arg(0));
+        let [region] = &regions[..] else {
+            return Some(Err(if regions.len() > 1 {
+                "extrudes more than one profile".to_string()
+            } else {
+                "has no profile CreaBIM can read".to_string()
+            }));
+        };
+        if !region.holes.is_empty() {
+            return Some(Err("its profile has holes".into()));
+        }
+        let pos = pre * self.axis_placement(solid.arg(1));
+        let Some(local) = self.direction(solid.arg(2)) else {
+            return Some(Err("has no extrusion direction".into()));
+        };
+        // the run must leave square to its profile, like an authored one
+        if local.z.abs() < 1.0 - 1e-9 {
+            return Some(Err("extrudes obliquely to its profile".into()));
+        }
+        let Some(depth) = self.length(solid.arg(3)).filter(|d| *d > 1e-9) else {
+            return Some(Err("extrudes no depth".into()));
+        };
+        // the placement must not warp the run: one scale, square axes
+        let (ex, ey, ez) = (
+            pos.transform_vector3(DVec3::X),
+            pos.transform_vector3(DVec3::Y),
+            pos.transform_vector3(DVec3::Z),
+        );
+        let s = ex.length();
+        if s < 1e-9
+            || (ey.length() - s).abs() > 1e-6 * s
+            || (ez.length() - s).abs() > 1e-6 * s
+            || ex.dot(ey).abs() > 1e-6 * s * s
+            || ex.dot(ez).abs() > 1e-6 * s * s
+            || ey.dot(ez).abs() > 1e-6 * s * s
+        {
+            return Some(Err("is placed with a scale that warps it".into()));
+        }
+        let d = pos.transform_vector3(local * depth);
+        let height = d.length();
+        if height < 1e-9 {
+            return Some(Err("extrudes no depth".into()));
+        }
+        let n = d / height;
+        let ring: Vec<DVec3> = region
+            .outer
+            .iter()
+            .map(|p| pos.transform_point3(p.extend(0.0)))
+            .collect();
+        if n.z.abs() > 1.0 - 1e-9 {
+            // upright: a plan outline between two heights
+            let zr = ring[0].z;
+            let base = zr.min(zr + d.z);
+            return Some(Ok(ExtrudedPart {
+                outline: ring.iter().map(|p| p.truncate()).collect(),
+                base,
+                height,
+                plane: None,
+                z: base,
+            }));
+        }
+        // tilted: drawn on the plane of its ring, running along its normal
+        let o = pos.transform_point3(DVec3::ZERO);
+        let Some(x) = (pos.transform_vector3(DVec3::X)
+            - n * pos.transform_vector3(DVec3::X).dot(n))
+        .try_normalize() else {
+            return Some(Err("is placed with a scale that warps it".into()));
+        };
+        let y = n.cross(x);
+        let outline: Vec<DVec2> = ring
+            .iter()
+            .map(|p| {
+                let q = *p - o;
+                DVec2::new(q.dot(x), q.dot(y))
+            })
+            .collect();
+        Some(Ok(ExtrudedPart {
+            outline,
+            base: 0.0,
+            height,
+            plane: Some((o, x, y)),
+            z: o.z,
         }))
     }
 }
@@ -1385,6 +1512,22 @@ pub(crate) fn extrude_mesh(x: &Extrusion, out: &mut EditMesh) {
             }
         }
     }
+}
+
+/// A straight run CreaBIM can build as one native extrusion: the
+/// product's body a single `IfcExtrudedAreaSolid` of one clean profile.
+/// Upright (`plane` none) the outline lies in plan, `base` and `height`
+/// above the level; tilted it lies on `plane` (origin, `x`, `y` in the
+/// level's frame like an authored plane extrusion) with `base` along
+/// the plane's normal. `z` is the world height of the run's foot, for
+/// picking the storey.
+#[derive(Debug)]
+pub(crate) struct ExtrudedPart {
+    pub outline: Vec<DVec2>,
+    pub base: f64,
+    pub height: f64,
+    pub plane: Option<(DVec3, DVec3, DVec3)>,
+    pub z: f64,
 }
 
 /// Revolve a region about the axis through `a0` along `dir` (profile frame).
@@ -1645,6 +1788,165 @@ mod tests {
         // signed volumes: the mesh path flips its winding for a negative
         // angle, so the magnitudes agree
         assert!((m.volume().abs() - swept.volume().abs()).abs() < 0.005 * swept.volume().abs());
+    }
+
+    #[test]
+    fn a_clipped_revolve_maps_to_its_sweep_with_the_boolean_warned() {
+        // edge-beam-8's configuration: the sweep first, cut by a half
+        // space the native reading ignores — exactly what the mesh path
+        // does, which the warning says
+        let f = geo(
+            "#1=IFCCARTESIANPOINTLIST2D(((5.,-0.15),(5.3,-0.15),(5.3,0.15),(5.,0.15)));\
+            #2=IFCINDEXEDPOLYCURVE(#1,(IFCLINEINDEX((1,2,3,4,1))),$);\
+            #3=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#2);\
+            #4=IFCCARTESIANPOINT((0.,0.,0.));\
+            #5=IFCDIRECTION((0.,1.,0.));#6=IFCAXIS1PLACEMENT(#4,#5);\
+            #7=IFCCARTESIANPOINT((2.,1.,0.5));#8=IFCDIRECTION((0.,0.,1.));\
+            #9=IFCAXIS2PLACEMENT3D(#7,#8,$);\
+            #10=IFCREVOLVEDAREASOLID(#3,#9,#6,1.2);\
+            #11=IFCPLANE(#9);#12=IFCHALFSPACESOLID(#11,.F.);\
+            #13=IFCBOOLEANCLIPPINGRESULT(.DIFFERENCE.,#10,#12);\
+            #14=IFCSHAPEREPRESENTATION($,'Body','Clipping',(#13));\
+            #15=IFCPRODUCTDEFINITIONSHAPE($,$,(#14));\
+            #18=IFCAXIS2PLACEMENT3D(#4,$,$);#16=IFCLOCALPLACEMENT($,#18);\
+            #17=IFCBEAM('0hUYrQRzX4jeuyugCUcdLX',$,'clipped',$,$,#16,#15,$,$);",
+        );
+        let mut g = Geo::new(&f, 1.0, 1.0);
+        let world = g.placement(&Value::Ref(16));
+        let product = g.f.get(17).unwrap();
+        let s = g
+            .revolved_sweep(product, &world)
+            .expect("mapped")
+            .expect("sweepable");
+        assert!((s.sweep - 1.2).abs() < 1e-12);
+        assert!((s.center - DVec3::new(2.0, 1.0, 0.5)).length() < 1e-12);
+        let (warnings, _) = std::mem::take(&mut g.warnings).into_parts();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("boolean difference ignored")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn an_upright_extrusion_maps_to_a_plan_outline() {
+        // a bridge L-angle: 80 x 80 x 8 mm, five metres straight up
+        let f = geo(
+            "#1=IFCCARTESIANPOINTLIST2D(((-0.005,0.),(-0.085,0.),(-0.085,-0.008),(-0.013,-0.008),(-0.013,-0.08),(-0.005,-0.08)));\
+            #2=IFCINDEXEDPOLYCURVE(#1,(IFCLINEINDEX((1,2,3,4,5,6,1))),$);\
+            #3=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#2);\
+            #4=IFCCARTESIANPOINT((0.2829,6.8313,0.));\
+            #5=IFCDIRECTION((0.,0.,1.));#6=IFCDIRECTION((0.058,0.9983,0.));\
+            #7=IFCAXIS2PLACEMENT3D(#4,#5,#6);\
+            #8=IFCDIRECTION((0.,0.,1.));#9=IFCEXTRUDEDAREASOLID(#3,#7,#8,4.984);\
+            #10=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#9));\
+            #11=IFCPRODUCTDEFINITIONSHAPE($,$,(#10));\
+            #12=IFCCARTESIANPOINT((0.,0.,0.));#14=IFCAXIS2PLACEMENT3D(#12,$,$);\
+            #13=IFCLOCALPLACEMENT($,#14);\
+            #15=IFCBEAM('0VG7TEtxbC$RAbiRyMpDfw',$,'angle',$,$,#13,#11,$,$);",
+        );
+        let mut g = Geo::new(&f, 1.0, 1.0);
+        let world = g.placement(&Value::Ref(13));
+        let product = g.f.get(15).unwrap();
+        let s = g
+            .extruded_part(product, &world)
+            .expect("mapped")
+            .expect("extrudable");
+        assert!(s.plane.is_none());
+        assert!((s.base - 0.0).abs() < 1e-9);
+        assert!((s.height - 4.984).abs() < 1e-9);
+        // the L rides whole: six corners, same section, rotated in plan
+        assert_eq!(s.outline.len(), 6);
+        let area = creabim_core::polygon::signed_area2(&s.outline).abs() / 2.0;
+        assert!((area - 0.001216).abs() < 1e-9, "{area}");
+    }
+
+    #[test]
+    fn a_tilted_extrusion_maps_to_a_plane_extrusion() {
+        // thirty degrees off vertical: the outline lives on the ring plane
+        let f = geo(
+            "#1=IFCCARTESIANPOINTLIST2D(((0.,0.),(0.05,0.),(0.05,0.008),(0.008,0.008),(0.008,0.05),(0.,0.05)));\
+            #2=IFCINDEXEDPOLYCURVE(#1,(IFCLINEINDEX((1,2,3,4,5,6,1))),$);\
+            #3=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#2);\
+            #4=IFCCARTESIANPOINT((1.,2.,3.));\
+            #5=IFCDIRECTION((0.,-0.5,0.8660254));#6=IFCDIRECTION((1.,0.,0.));\
+            #7=IFCAXIS2PLACEMENT3D(#4,#5,#6);\
+            #8=IFCDIRECTION((0.,0.,1.));#9=IFCEXTRUDEDAREASOLID(#3,#7,#8,2.);\
+            #10=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#9));\
+            #11=IFCPRODUCTDEFINITIONSHAPE($,$,(#10));\
+            #12=IFCCARTESIANPOINT((0.,0.,0.));#14=IFCAXIS2PLACEMENT3D(#12,$,$);\
+            #13=IFCLOCALPLACEMENT($,#14);\
+            #15=IFCBEAM('0VG7TEtxbC$RAbiRyMpDfw',$,'raked',$,$,#13,#11,$,$);",
+        );
+        let mut g = Geo::new(&f, 1.0, 1.0);
+        let world = g.placement(&Value::Ref(13));
+        let product = g.f.get(15).unwrap();
+        let s = g
+            .extruded_part(product, &world)
+            .expect("mapped")
+            .expect("extrudable");
+        let Some((o, x, y)) = s.plane else {
+            panic!("a tilted run is drawn on a plane");
+        };
+        assert!((s.height - 2.0).abs() < 1e-9);
+        assert!((o - DVec3::new(1.0, 2.0, 3.0)).length() < 1e-6);
+        // the frame is square and right-handed about the run
+        assert!((x.dot(y)).abs() < 1e-9);
+        assert!((x.cross(y) - DVec3::new(0.0, -0.5, 0.8660254)).length() < 1e-6);
+        // the section comes back as drawn: 50 x 50 mm L
+        assert_eq!(s.outline.len(), 6);
+        let (lo, hi) = s.outline.iter().fold(
+            (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)),
+            |(a, b), p| (a.min(*p), b.max(*p)),
+        );
+        assert!((hi.x - lo.x - 0.05).abs() < 1e-6, "{lo} {hi}");
+        assert!((hi.y - lo.y - 0.05).abs() < 1e-6, "{lo} {hi}");
+    }
+
+    #[test]
+    fn an_extrusion_that_is_no_clean_run_stays_a_mesh() {
+        // tapered, holed, oblique: each its own product, each with its why
+        let square = "#1=IFCCARTESIANPOINTLIST2D(((0.,0.),(1.,0.),(1.,1.),(0.,1.)));\
+            #2=IFCINDEXEDPOLYCURVE(#1,(IFCLINEINDEX((1,2,3,4,1))),$);\
+            #3=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#2);";
+        let tail = "#13=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#12));\
+            #14=IFCPRODUCTDEFINITIONSHAPE($,$,(#13));\
+            #15=IFCAXIS2PLACEMENT3D(#9,$,$);#16=IFCLOCALPLACEMENT($,#15);\
+            #17=IFCCOLUMN('0VG7TEtxbC$RAbiRyMpDfw',$,'odd',$,$,#16,#14,$,$);";
+        let flat_pos = "#9=IFCCARTESIANPOINT((0.,0.,0.));#10=IFCAXIS2PLACEMENT3D(#9,$,$);";
+        for solid in [
+            // tapers along its depth
+            "#11=IFCDIRECTION((0.,0.,1.));#12=IFCEXTRUDEDAREASOLIDTAPERED(#3,#10,#11,2.,1.,1.);",
+            // leaves at 45 degrees to its profile
+            "#11=IFCDIRECTION((0.,0.7071,0.7071));#12=IFCEXTRUDEDAREASOLID(#3,#10,#11,2.);",
+        ] {
+            let f = geo(&format!("{square}{flat_pos}{solid}{tail}"));
+            let mut g = Geo::new(&f, 1.0, 1.0);
+            let product = g.f.get(17).unwrap();
+            let s = g
+                .extruded_part(product, &DMat4::IDENTITY)
+                .expect("a single extrusion");
+            assert!(s.is_err(), "expected a why, got {s:?}");
+        }
+        // holed: the profile carries a void
+        let f = geo(&format!(
+            "#1=IFCCARTESIANPOINTLIST2D(((0.,0.),(1.,0.),(1.,1.),(0.,1.)));\
+            #2=IFCINDEXEDPOLYCURVE(#1,(IFCLINEINDEX((1,2,3,4,1))),$);\
+            #3=IFCCARTESIANPOINT((0.2,0.2));#4=IFCCARTESIANPOINT((0.8,0.2));\
+            #5=IFCCARTESIANPOINT((0.8,0.8));#6=IFCCARTESIANPOINT((0.2,0.8));\
+            #7=IFCPOLYLINE((#3,#4,#5,#6,#3));\
+            #8=IFCARBITRARYPROFILEDEFWITHVOIDS(.AREA.,$,#2,(#7));\
+            {flat_pos}\
+            #11=IFCDIRECTION((0.,0.,1.));#12=IFCEXTRUDEDAREASOLID(#8,#10,#11,2.);\
+            {tail}"
+        ));
+        let mut g = Geo::new(&f, 1.0, 1.0);
+        let product = g.f.get(17).unwrap();
+        let s = g
+            .extruded_part(product, &DMat4::IDENTITY)
+            .expect("a single extrusion");
+        assert!(s.is_err(), "expected a why, got {s:?}");
     }
 
     #[test]

@@ -48,9 +48,27 @@ impl Importer<'_> {
                         Err(why) => Err(why),
                     }
                 } else if COLUMNS.contains(&class) {
-                    self.native_column(id, e, &world).map(ElementKind::Column)
+                    // a section no column builds (an I- or cross-section)
+                    // still extrudes cleanly as a part
+                    match self.native_column(id, e, &world) {
+                        Ok(c) => Ok(ElementKind::Column(c)),
+                        Err(why) => match self.g.extruded_part(e, &world) {
+                            Some(Ok(s)) => Ok(self.extruded_part_ctor(id, e, s)),
+                            Some(Err(w)) => Err(w),
+                            None => Err(why),
+                        },
+                    }
                 } else if BEAMS.contains(&class) {
-                    self.native_beam(id, e, &world).map(ElementKind::Beam)
+                    // a section no beam builds, or a bar no beam follows
+                    // (sloped, L- or I-section), still extrudes as a part
+                    match self.native_beam(id, e, &world) {
+                        Ok(b) => Ok(ElementKind::Beam(b)),
+                        Err(why) => match self.g.extruded_part(e, &world) {
+                            Some(Ok(s)) => Ok(self.extruded_part_ctor(id, e, s)),
+                            Some(Err(w)) => Err(w),
+                            None => Err(why),
+                        },
+                    }
                 } else {
                     // roofs, stairs and railings from other tools stay
                     // meshes with their class
