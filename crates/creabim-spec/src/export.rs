@@ -826,6 +826,7 @@ fn part(e: &Element, id: &str, p: &parts::Part, ids: &Ids) -> f::Part {
         path: vec![],
         closed: false,
         face_normal: None,
+        arc: None,
         wall: None,
         edge: f::WallEdge::Top,
         offset: 0.0,
@@ -863,6 +864,19 @@ fn part(e: &Element, id: &str, p: &parts::Part, ids: &Ids) -> f::Part {
                     out.path = points.clone();
                     out.closed = *closed;
                     out.face_normal = *normal;
+                }
+                parts::Path::Arc {
+                    center,
+                    axis,
+                    start,
+                    sweep,
+                } => {
+                    out.arc = Some(f::ArcPath {
+                        center: *center,
+                        axis: *axis,
+                        start: *start,
+                        sweep: sweep.to_degrees(),
+                    });
                 }
                 parts::Path::Wall {
                     wall,

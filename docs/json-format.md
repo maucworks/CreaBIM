@@ -663,6 +663,17 @@ A plane anywhere in the model: its origin (height above the level) and two squar
 | `x` | [x, y, z] | required |  |
 | `y` | [x, y, z] | required |  |
 
+### ArcPath
+
+A sweep's arc: a point on the turn axis, the turn direction, where the arc begins and how far it turns (degrees, positive by the right-hand rule about the axis). A full turn closes on itself. The profile rides the arc: its `y` runs along `axis`, its `x` to the path's left.
+
+| Field | Type | | Description |
+|---|---|---|---|
+| `center` | [x, y, z] | required |  |
+| `axis` | [x, y, z] | required |  |
+| `start` | [x, y, z] | required |  |
+| `sweep` | number | required |  |
+
 ### WallEdge
 
 A wall's top or base.
@@ -688,6 +699,7 @@ An extrusion of a plan outline, or a sweep of a profile along a path. A void cut
 | `path` | array of [x, y, z] |  | A sweep's path through points, `z` above the level. |
 | `closed` | boolean | default `false` | The path runs from its last point back to its first. |
 | `face_normal` | [x, y, z] |  | A path drawn on a face: the face's outward normal, which the profile's `y` runs along instead of up. |
+| `arc` | [ArcPath](#arcpath) |  | A sweep round an arc: the profile rides the arc, its `y` along the turn axis. A full turn (sweep 360) closes on itself. |
 | `wall` | string |  | A sweep along a wall's id, at its top or base: it follows the wall (a coping, a plinth). |
 | `edge` | [WallEdge](#walledge) | default `"top"` |  |
 | `offset` | number | default `0.0` | Lifts a wall path off its edge. |

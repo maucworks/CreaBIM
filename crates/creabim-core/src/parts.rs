@@ -20,6 +20,7 @@
 use crate::{transform::Xform, Element, ElementId, ElementKind, Model};
 use glam::{DVec2, DVec3};
 use serde::{Deserialize, Serialize};
+use std::f64::consts::{FRAC_PI_2, TAU};
 
 /// The IFC class a part exports as unless the user picks another.
 pub const PROXY: &str = "IfcBuildingElementProxy";
@@ -91,6 +92,21 @@ pub enum Path {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         normal: Option<DVec3>,
     },
+    /// Round a circular arc: `center` a point on the turn axis, `axis` the
+    /// turn direction (unit), `start` where the arc begins, `sweep` the
+    /// signed angle about `axis` (positive by the right-hand rule), all in
+    /// the level's frame like [`Path::Points`]'s points. A full turn closes
+    /// on itself. The profile rides the arc the way it rides any face-drawn
+    /// path: its `y` runs along `axis`, its `x` to the path's left. This is
+    /// the shape of an IfcRevolvedAreaSolid whose profile plane holds the
+    /// axis (a beam bent in a plane); revolves whose profile plane is
+    /// tilted or offset from the axis are not sweeps and stay meshes.
+    Arc {
+        center: DVec3,
+        axis: DVec3,
+        start: DVec3,
+        sweep: f64,
+    },
     /// Along a wall's centreline, from its start to its end, at its top or
     /// its base: it follows the wall when the wall moves or grows.
     /// `offset` lifts the path off that edge; `extend` runs it on past the
@@ -104,6 +120,63 @@ pub enum Path {
         extend: [f64; 2],
     },
 }
+
+/// How far a refined arc's chord may bow from the true curve (model
+/// units): half a millimetre, under a tenth of a paper millimetre even at
+/// 1:20.
+pub const ARC_TOLERANCE: f64 = 0.0005;
+
+/// The arc's frame at `start`: the constant offset along `axis`, the unit
+/// radial (centre → start, perpendicular to `axis`), its quarter-turn
+/// partner about `axis`, and the radius. None when `start` sits on the
+/// axis (no circle through it).
+fn arc_frame(center: DVec3, axis: DVec3, start: DVec3) -> Option<(DVec3, DVec3, DVec3, f64)> {
+    let axis = axis.normalize_or(DVec3::Z);
+    let out = start - center;
+    let along = axis * out.dot(axis);
+    let radial = out - along;
+    let radius = radial.length();
+    (radius > 1e-9).then(|| {
+        let u = radial / radius;
+        (along, u, axis.cross(u), radius)
+    })
+}
+
+/// The point `sweep` radians along the arc (right-hand about `axis`).
+fn arc_point(center: DVec3, axis: DVec3, start: DVec3, sweep: f64) -> DVec3 {
+    let Some((along, u, v, radius)) = arc_frame(center, axis, start) else {
+        return start;
+    };
+    center + along + (u * sweep.cos() + v * sweep.sin()) * radius
+}
+
+/// The arc as a polyline, refined so no chord bows more than
+/// [`ARC_TOLERANCE`] from the true curve: `(points, closed)`. A full turn
+/// closes on itself and leaves the end point off (it is the first again).
+pub fn arc_path(center: DVec3, axis: DVec3, start: DVec3, sweep: f64) -> (Vec<DVec3>, bool) {
+    let closed = sweep.abs() >= TAU - 1e-6;
+    let sweep = if closed { sweep.signum() * TAU } else { sweep };
+    let Some((along, u, v, radius)) = arc_frame(center, axis, start) else {
+        return (vec![start], false);
+    };
+    // a chord of angle d bows r * (1 - cos(d / 2)); keep that at most
+    // ARC_TOLERANCE, in 90° steps when the radius is tiny
+    let step = if radius > ARC_TOLERANCE {
+        2.0 * (1.0 - ARC_TOLERANCE / radius).clamp(-1.0, 1.0).acos()
+    } else {
+        FRAC_PI_2
+    };
+    let n = ((sweep.abs() / step).ceil() as usize).clamp(2, 4096);
+    let last = if closed { n } else { n + 1 };
+    let pts = (0..last)
+        .map(|k| {
+            let a = sweep * k as f64 / n as f64;
+            center + along + (u * a.cos() + v * a.sin()) * radius
+        })
+        .collect();
+    (pts, closed)
+}
+
 
 /// Which edge of a wall a sweep follows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +258,12 @@ impl Part {
                 path: Path::Points { normal, .. },
                 ..
             } => *normal,
+            // an arc's face is the plane it turns in: the profile's `y`
+            // runs along its axis
+            Form::Sweep {
+                path: Path::Arc { axis, .. },
+                ..
+            } => Some(axis.normalize_or(DVec3::Z)),
             _ => None,
         }
     }
@@ -252,6 +331,25 @@ impl Part {
                             return Err("a sweep's path needs two finite points".into());
                         }
                     }
+                    Path::Arc {
+                        center,
+                        axis,
+                        start,
+                        sweep,
+                    } => {
+                        if !(center.is_finite() && start.is_finite() && sweep.is_finite()) {
+                            return Err("a sweep's arc needs a finite centre, start and angle".into());
+                        }
+                        if !axis.is_finite() || axis.length() < 1e-9 {
+                            return Err("a sweep's arc needs an axis direction".into());
+                        }
+                        if !(sweep.abs() > 1e-9 && sweep.abs() <= TAU + 1e-9) {
+                            return Err("a sweep's arc angle must be within a full turn".into());
+                        }
+                        if arc_frame(*center, *axis, *start).is_none() {
+                            return Err("a sweep's arc start must be off its axis".into());
+                        }
+                    }
                     Path::Wall { offset, extend, .. } => {
                         if !offset.is_finite() || !extend.iter().all(|e| e.is_finite()) {
                             return Err("a sweep's wall offsets must be finite".into());
@@ -273,6 +371,19 @@ impl Part {
             Path::Points { points, closed, .. } => {
                 let z = crate::members::elevation(model, self.level);
                 Some((points.iter().map(|p| *p + DVec3::Z * z).collect(), *closed))
+            }
+            Path::Arc {
+                center,
+                axis,
+                start,
+                sweep,
+            } => {
+                let z = crate::members::elevation(model, self.level);
+                let (pts, closed) = arc_path(*center, *axis, *start, *sweep);
+                Some((
+                    pts.into_iter().map(|p| p + DVec3::Z * z).collect(),
+                    closed,
+                ))
             }
             Path::Wall {
                 wall,
@@ -574,6 +685,25 @@ pub fn transform(part: &mut Part, t: &Xform, lift: f64) -> Option<()> {
             Form::Extrusion { plane, .. } if plane.is_none() => {
                 *plane = Some(crate::Workplane::ground(0.0));
             }
+            // an arc off its level becomes a polyline drawn on the face it
+            // turns in, and the face treatment below carries it from there
+            Form::Sweep { path, .. } if matches!(path, Path::Arc { .. }) => {
+                let (center, axis, start, sweep) = match &*path {
+                    Path::Arc {
+                        center,
+                        axis,
+                        start,
+                        sweep,
+                    } => (*center, *axis, *start, *sweep),
+                    _ => unreachable!(),
+                };
+                let (pts, closed) = arc_path(center, axis, start, sweep);
+                *path = Path::Points {
+                    points: pts,
+                    closed,
+                    normal: Some(axis.normalize_or(DVec3::Z)),
+                };
+            }
             Form::Sweep {
                 path: Path::Points { normal, .. },
                 ..
@@ -651,6 +781,28 @@ pub fn transform(part: &mut Part, t: &Xform, lift: f64) -> Option<()> {
                 Path::Points { points, .. } => {
                     for p in points.iter_mut() {
                         *p = t.point2(p.truncate()).extend(p.z + dz);
+                    }
+                }
+                Path::Arc {
+                    center,
+                    axis,
+                    start,
+                    sweep,
+                } => {
+                    // the whole circle goes where the change takes it; the
+                    // radius is in the points, so a scale reaches it too
+                    let end = arc_point(*center, *axis, *start, *sweep);
+                    *center = p3(*center);
+                    *start = p3(*start);
+                    *axis = match reflect {
+                        Some(f) => (*axis * f).normalize_or(*axis),
+                        None => t.direction(*axis).normalize_or(*axis),
+                    };
+                    let end = p3(end);
+                    if flips {
+                        // a mirror turns the path round: the arc's ends swap
+                        *start = end;
+                        *sweep = -*sweep;
                     }
                 }
                 // it goes where its wall goes
@@ -836,5 +988,169 @@ mod tests {
             0.0
         )
         .is_none());
+    }
+
+    fn arc() -> (DVec3, DVec3, DVec3) {
+        (DVec3::ZERO, DVec3::Z, DVec3::new(10.0, 0.0, 2.5))
+    }
+
+    #[test]
+    fn an_arc_refines_within_tolerance() {
+        let (center, axis, start) = arc();
+        let radius_on = |p: DVec3| {
+            let out = p - center;
+            (out - axis * out.dot(axis)).length()
+        };
+        let (pts, closed) = arc_path(center, axis, start, TAU);
+        assert!(closed);
+        // a full ring never repeats its first point
+        assert!(pts[0].distance(*pts.last().unwrap()) > 1e-6);
+        // every point on the circle, every chord within the tolerance
+        for p in &pts {
+            assert!((radius_on(*p) - 10.0).abs() < 1e-9);
+            assert!((p.z - 2.5).abs() < 1e-9);
+        }
+        for w in pts.windows(2) {
+            let mid = (w[0] + w[1]) / 2.0;
+            let bow = (radius_on(mid) - 10.0).abs();
+            assert!(bow <= ARC_TOLERANCE * 1.0001, "chord bows {bow}");
+        }
+    }
+
+    #[test]
+    fn an_arc_ends_where_it_says() {
+        let (center, axis, start) = arc();
+        let (pts, closed) = arc_path(center, axis, start, FRAC_PI_2);
+        assert!(!closed);
+        assert_eq!(pts.last().unwrap(), &arc_point(center, axis, start, FRAC_PI_2));
+    }
+
+    #[test]
+    fn an_arc_sweep_validates_and_resolves() {
+        let l = ElementId::new();
+        let (center, axis, start) = arc();
+        let p = Part::sweep(
+            l,
+            rectangle(0.2, 0.5),
+            Path::Arc {
+                center,
+                axis,
+                start,
+                sweep: TAU,
+            },
+        );
+        assert!(p.validate().is_ok());
+        // face-drawn like any revolved sweep: the profile's y runs along
+        // the axis
+        assert_eq!(p.face_normal(), Some(axis));
+        let lv = level();
+        let m = Model::from_elements([lv.clone()]).unwrap();
+        let (pts, closed) = p.path(&m).unwrap();
+        assert!(closed);
+        // the level's elevation lifts every point
+        assert!((pts[0].z - 2.5).abs() < 1e-9);
+        // a start on the axis is no circle, and out-of-turn angles fail
+        let on_axis = Part::sweep(
+            l,
+            rectangle(0.2, 0.5),
+            Path::Arc {
+                center,
+                axis,
+                start: DVec3::new(0.0, 0.0, 2.5),
+                sweep: 1.0,
+            },
+        );
+        assert!(on_axis.validate().is_err());
+        let over = Part::sweep(
+            l,
+            rectangle(0.2, 0.5),
+            Path::Arc {
+                center,
+                axis,
+                start,
+                sweep: TAU + 0.1,
+            },
+        );
+        assert!(over.validate().is_err());
+    }
+
+    #[test]
+    fn an_arc_moves_turns_scales_and_mirrors() {
+        let l = ElementId::new();
+        let (center, axis, start) = arc();
+        let mut p = Part::sweep(
+            l,
+            rectangle(0.2, 0.5),
+            Path::Arc {
+                center,
+                axis,
+                start,
+                sweep: 1.0,
+            },
+        );
+        // a quarter turn in plan turns the whole circle with it
+        transform(
+            &mut p,
+            &Xform::Rotate {
+                center: DVec2::ZERO,
+                degrees: 90.0,
+            },
+            0.0,
+        )
+        .unwrap();
+        let Form::Sweep {
+            path: Path::Arc { center, start, .. },
+            ..
+        } = &p.form
+        else {
+            unreachable!()
+        };
+        assert!(center.length() < 1e-9);
+        // the start keeps its radius and height, pointing along +y now
+        assert!((start.truncate().length() - 10.0).abs() < 1e-9);
+        assert!((start.z - 2.5).abs() < 1e-9);
+        assert!(p.validate().is_ok());
+        // a plan mirror reverses the turn and swaps the ends
+        transform(
+            &mut p,
+            &Xform::Stretch {
+                center: DVec3::ZERO,
+                factor: DVec3::new(-1.0, 1.0, 1.0),
+            },
+            0.0,
+        )
+        .unwrap();
+        let Form::Sweep {
+            path: Path::Arc { center, axis, start, sweep },
+            ..
+        } = &p.form
+        else {
+            unreachable!()
+        };
+        assert!((*sweep + 1.0).abs() < 1e-9);
+        assert!((start.truncate().length() - 10.0).abs() < 1e-9);
+        assert!((start.z - 2.5).abs() < 1e-9);
+        // the arc still lies on its circle after the swap
+        let (pts, _) = arc_path(*center, *axis, *start, *sweep);
+        for p in &pts {
+            let out = *p - *center;
+            assert!((out.truncate().length() - 10.0).abs() < 1e-9);
+        }
+        assert!(p.validate().is_ok());
+        // upside down, the arc becomes a polyline drawn on a face
+        transform(
+            &mut p,
+            &Xform::Stretch {
+                center: DVec3::ZERO,
+                factor: DVec3::new(1.0, 1.0, -1.0),
+            },
+            0.0,
+        )
+        .unwrap();
+        assert!(matches!(
+            &p.form,
+            Form::Sweep { path: Path::Points { normal: Some(_), .. }, .. }
+        ));
+        assert!(p.validate().is_ok());
     }
 }

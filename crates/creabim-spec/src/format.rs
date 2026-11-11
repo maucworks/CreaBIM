@@ -649,6 +649,9 @@ spec_struct! {
         /// A path drawn on a face: the face's outward normal, which the
         /// profile's `y` runs along instead of up.
         face_normal: Option<DVec3>,
+        /// A sweep round an arc: the profile rides the arc, its `y` along
+        /// the turn axis. A full turn (sweep 360) closes on itself.
+        arc: Option<ArcPath>,
         /// A sweep along a wall's id, at its top or base: it follows the
         /// wall (a coping, a plinth).
         wall: Option<String>,
@@ -671,6 +674,20 @@ spec_struct! {
         origin: DVec3,
         x: DVec3,
         y: DVec3,
+    }
+}
+
+spec_struct! {
+    /// A sweep's arc: a point on the turn axis, the turn direction, where
+    /// the arc begins and how far it turns (degrees, positive by the
+    /// right-hand rule about the axis). A full turn closes on itself. The
+    /// profile rides the arc: its `y` runs along `axis`, its `x` to the
+    /// path's left.
+    pub struct ArcPath {
+        center: DVec3,
+        axis: DVec3,
+        start: DVec3,
+        sweep: f64,
     }
 }
 

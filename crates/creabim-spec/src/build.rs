@@ -1300,6 +1300,8 @@ fn part(c: &mut Ctx, p: &f::Part, at: &Path) {
         &["outline", "holes", "base", "height", "plane"]
     } else if p.wall.is_some() {
         &["profile", "wall", "edge", "offset", "extend"]
+    } else if p.arc.is_some() {
+        &["profile", "arc"]
     } else {
         &["profile", "path", "closed", "face_normal"]
     };
@@ -1347,11 +1349,42 @@ fn part(c: &mut Ctx, p: &f::Part, at: &Path) {
                 offset: c.l(p.offset),
                 extend: p.extend.map(|x| c.p(x).to_array()).unwrap_or([0.0; 2]),
             },
+            None if p.arc.is_some() => {
+                let a = p.arc.as_ref().unwrap();
+                let at = at.key("arc");
+                let axis = a.axis.try_normalize();
+                if axis.is_none() {
+                    c.err(&at.key("axis"), "a turn axis needs a direction");
+                    return c.fail(&p.id);
+                }
+                let center = c.p3(a.center);
+                let start = c.p3(a.start);
+                let axis = axis.unwrap();
+                let out = start - center;
+                let radial = out - axis * out.dot(axis);
+                if radial.length() < 1e-9 {
+                    c.err(&at.key("start"), "an arc's start must be off its axis");
+                    return c.fail(&p.id);
+                }
+                if !(a.sweep.abs() > 1e-9 && a.sweep.abs() <= 360.0 + 1e-9) {
+                    c.err(
+                        &at.key("sweep"),
+                        "an arc's sweep must be within a full turn (360)",
+                    );
+                    return c.fail(&p.id);
+                }
+                parts::Path::Arc {
+                    center,
+                    axis,
+                    start,
+                    sweep: a.sweep.to_radians(),
+                }
+            }
             None => {
                 if p.path.len() < 2 {
                     c.err(
                         at,
-                        "a sweep needs a `path` of at least 2 points, or a `wall`",
+                        "a sweep needs a `path` of at least 2 points, an `arc`, or a `wall`",
                     );
                     return c.fail(&p.id);
                 }

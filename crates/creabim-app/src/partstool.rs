@@ -790,6 +790,31 @@ fn part_fields(ui: &mut egui::Ui, model: &Model, p: &mut Part) -> &'static str {
                     }
                     weak(ui, format!("A path through {} points.", points.len()));
                 }
+                Path::Arc {
+                    center,
+                    axis,
+                    start,
+                    sweep,
+                } => {
+                    // the turn, in degrees like everywhere else in the app
+                    let mut deg = sweep.to_degrees();
+                    if num(ui, "Turn", &mut deg, -360.0, 360.0) {
+                        *sweep = deg.to_radians();
+                        label = "Sweep turn";
+                    }
+                    // the radius, from where the arc starts
+                    let out = *start - *center;
+                    let radial = out - axis.normalize_or(DVec3::Z) * out.dot(axis.normalize_or(DVec3::Z));
+                    weak(ui, format!(
+                        "Turns {} around a radius of {}.",
+                        if sweep.abs() >= std::f64::consts::TAU - 1e-6 {
+                            "a full circle".to_string()
+                        } else {
+                            format!("{:.1}°", deg.abs())
+                        },
+                        crate::units::len(radial.length()),
+                    ));
+                }
             }
         }
     }
