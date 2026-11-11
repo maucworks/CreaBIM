@@ -266,7 +266,7 @@ Every item of *CreaBIM brief 02: consolidated*, approved by the owner on 2026-11
 | Roofs, stairs and railings from other tools stay typed meshes, and `IfcMember` stays a mesh. Only CreaBIM's own exports bring them back native. | L | ifc-import, building-elements | |
 | Openings are not cut in walls imported as meshes, and their doors and windows don't become native openings. | L | exchange, review | |
 | L-shaped or T-shaped wall B-reps stay meshes rather than being split into straight walls. Notched or stepped beams, and sloped columns and beams, stay meshes. | M | ifc-import | |
-| IFC STEP import of parts and site elements brings back plain shapes, not parametric elements — except arc sweeps, which round-trip as `IfcRevolvedAreaSolid`. IFCX round-trips them. | M | parts-site | |
+| IFC STEP import of parts and site elements brings back plain shapes, not parametric elements — except arc sweeps and single clean extrusions, which round-trip as `IfcRevolvedAreaSolid` / `IfcExtrudedAreaSolid`. IFCX round-trips them. | M | parts-site | |
 | NURBS and curved advanced B-rep faces are not read. | M | exchange | |
 | Each element is exported as one body. Layers are described only by the material layer set, not as one solid per layer. | M | layered-assemblies | |
 | Cut elements export as meshes, not `IfcBooleanResult` (attached wall tops already use `IfcBooleanClippingResult`). | M | exchange, wall-behaviour | |

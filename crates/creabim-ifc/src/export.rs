@@ -223,6 +223,59 @@ impl Ctx {
         )
     }
 
+    /// An extrusion as the extrusion it is, in the storey's frame:
+    /// `None` when it is degenerate, so the caller falls back to the
+    /// shape as built, tessellated. The Position frames the ring plane
+    /// (`origin`, `x`, `y`) and the run leaves along its normal — local
+    /// +Z, like every extrusion CreaBIM writes — the configuration
+    /// `extruded_part` reads back, upright or tilted.
+    fn extruded_solid(
+        &mut self,
+        profile: &[DVec2],
+        origin: DVec3,
+        x: DVec3,
+        y: DVec3,
+        dir: DVec3,
+        depth: f64,
+    ) -> Option<Ref> {
+        if profile.len() < 3
+            || profile.iter().any(|p| !p.is_finite())
+            || depth <= 1e-9
+            || !origin.is_finite()
+        {
+            return None;
+        }
+        let (Some(x), Some(y), Some(dir)) =
+            (x.try_normalize(), y.try_normalize(), dir.try_normalize())
+        else {
+            return None;
+        };
+        if (x.dot(y).abs() > 1e-9 || x.dot(dir).abs() > 1e-9 || y.dot(dir).abs() > 1e-9)
+            || (x.cross(y) - dir).length() > 1e-6
+        {
+            return None;
+        }
+        let mut pts: Vec<DVec2> = profile.to_vec();
+        if creabim_core::polygon::signed_area2(&pts) < 0.0 {
+            pts.reverse();
+        }
+        let mut refs: Vec<Ref> = pts
+            .iter()
+            .map(|p| self.w.add("IFCCARTESIANPOINT", point2(p.x, p.y)))
+            .collect();
+        refs.push(refs[0]);
+        let poly = self.w.add("IFCPOLYLINE", list(&refs));
+        let prof = self
+            .w
+            .add("IFCARBITRARYCLOSEDPROFILEDEF", format!(".AREA.,$,{poly}"));
+        let pos = self.placement3d(origin, Some(x.cross(y)), Some(x));
+        Some(self.w.add(
+            "IFCEXTRUDEDAREASOLID",
+            // the run leaves along the Position's normal: local +Z
+            format!("{prof},{pos},{},{}", self.z_axis, real(depth)),
+        ))
+    }
+
     /// An arc sweep as the revolution it is, in the storey's frame (`z0`
     /// is the storey's elevation): `None` when the arc is degenerate, so
     /// the caller falls back to the shape as built, tessellated.
@@ -800,25 +853,52 @@ pub fn export_ifc4(model: &Model, opts: &ExportOptions) -> String {
                 };
                 let pl = c.local_placement(Some(spl), DVec3::ZERO, None);
                 let z0 = elevation(level);
-                // an arc sweep goes out as the revolution it is; cut with
-                // openings, or degenerate, it goes out tessellated as built
+                // an arc sweep goes out as the revolution it is, an
+                // extrusion as the extrusion it is; cut with openings,
+                // holed, or degenerate, either goes out tessellated
                 let mut param: Option<Ref> = None;
                 if cut.is_none() {
                     if let ElementKind::Part(p) = k {
                         if !p.void {
-                            if let creabim_core::parts::Form::Sweep {
-                                profile,
-                                path:
-                                    creabim_core::parts::Path::Arc {
-                                        center,
-                                        axis,
-                                        start,
-                                        sweep,
-                                    },
-                            } = &p.form
-                            {
-                                param =
-                                    c.revolved_solid(profile, *center, *axis, *start, *sweep, z0);
+                            match &p.form {
+                                creabim_core::parts::Form::Sweep {
+                                    profile,
+                                    path:
+                                        creabim_core::parts::Path::Arc {
+                                            center,
+                                            axis,
+                                            start,
+                                            sweep,
+                                        },
+                                } => {
+                                    param = c.revolved_solid(
+                                        profile, *center, *axis, *start, *sweep, z0,
+                                    );
+                                }
+                                creabim_core::parts::Form::Extrusion {
+                                    outline,
+                                    holes,
+                                    base,
+                                    height,
+                                    plane,
+                                } if holes.is_empty() => {
+                                    let (origin, x, y, dir) = match plane {
+                                        Some(pl) => (
+                                            pl.origin - DVec3::Z * z0,
+                                            pl.x,
+                                            pl.y,
+                                            pl.x.cross(pl.y),
+                                        ),
+                                        None => (
+                                            DVec3::new(0.0, 0.0, base - z0),
+                                            DVec3::X,
+                                            DVec3::Y,
+                                            DVec3::Z,
+                                        ),
+                                    };
+                                    param = c.extruded_solid(outline, origin, x, y, dir, *height);
+                                }
+                                _ => {}
                             }
                         }
                     }

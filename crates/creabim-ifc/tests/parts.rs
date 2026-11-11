@@ -194,3 +194,112 @@ fn arc_sweeps_export_as_revolved_solids_and_come_back_native() {
         }
     }
 }
+
+/// An upright L-column and a tilted L-beam: profiles no member kind builds.
+fn with_extruded_parts() -> Model {
+    use creabim_core::sample::sample_house;
+    use creabim_core::Workplane;
+    let mut m = sample_house();
+    let level = m
+        .levels()
+        .min_by(|a, b| a.1.elevation.total_cmp(&b.1.elevation))
+        .unwrap()
+        .0
+        .id;
+    // counter-clockwise L, like an authored outline
+    let angle = vec![
+        DVec2::new(0.0, 0.0),
+        DVec2::new(0.08, 0.0),
+        DVec2::new(0.08, 0.008),
+        DVec2::new(0.008, 0.008),
+        DVec2::new(0.008, 0.08),
+        DVec2::new(0.0, 0.08),
+    ];
+    let mut column = Part::extrusion(level, angle.clone(), 0.0, 2.75);
+    column.ifc_class = "IfcColumn".into();
+    let n = DVec3::new(0.0, -0.5, 0.8660254);
+    let x = DVec3::X;
+    let mut raked = Part::extrusion(level, angle, 0.0, 2.0);
+    if let creabim_core::parts::Form::Extrusion { plane, .. } = &mut raked.form {
+        *plane = Some(Workplane {
+            origin: DVec3::new(1.0, 2.0, 0.5),
+            x,
+            y: n.cross(x),
+        });
+    }
+    raked.ifc_class = "IfcBeam".into();
+    Transaction::new("extruded parts")
+        .insert(Element::new("Angle column", ElementKind::Part(column)))
+        .insert(Element::new("Raked angle", ElementKind::Part(raked)))
+        .apply(&mut m)
+        .unwrap();
+    m
+}
+
+type Extrusion = (Vec<DVec2>, f64, f64, Option<(DVec3, DVec3, DVec3)>);
+
+fn extrusion_of(e: &Element) -> Extrusion {
+    let ElementKind::Part(p) = &e.kind else {
+        panic!("{} is no part", e.name);
+    };
+    let creabim_core::parts::Form::Extrusion {
+        outline,
+        holes,
+        base,
+        height,
+        plane,
+    } = &p.form
+    else {
+        panic!("{} is no extrusion", e.name);
+    };
+    assert!(holes.is_empty());
+    (
+        outline.clone(),
+        *base,
+        *height,
+        plane.map(|pl| (pl.origin, pl.x, pl.y)),
+    )
+}
+
+#[test]
+fn extrusions_export_as_extruded_solids_and_come_back_native() {
+    use creabim_core::sample::sample_house;
+    let m = with_extruded_parts();
+    let text = export_ifc4(&m, &ExportOptions::default());
+    let bare = export_ifc4(&sample_house(), &ExportOptions::default());
+    // the two parts add two extrusions and no tessellation
+    assert_eq!(
+        count(&text, "IFCEXTRUDEDAREASOLID("),
+        count(&bare, "IFCEXTRUDEDAREASOLID(") + 2
+    );
+    assert_eq!(
+        count(&text, "IFCTRIANGULATEDFACESET("),
+        count(&bare, "IFCTRIANGULATEDFACESET(")
+    );
+    let r = import_ifc(&text).unwrap();
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    for (name, class) in [("Angle column", "IfcColumn"), ("Raked angle", "IfcBeam")] {
+        let before = m.iter().find(|e| e.name == name).unwrap();
+        let after = r.model.iter().find(|e| e.name == name).unwrap();
+        assert_eq!(after.id.ifc_guid(), before.id.ifc_guid());
+        assert_eq!(after.ifc_class(), class);
+        let (bo, bb, bh, bp) = extrusion_of(before);
+        let (ao, ab, ah, ap) = extrusion_of(after);
+        assert_eq!(ao.len(), bo.len());
+        for (a, b) in ao.iter().zip(&bo) {
+            assert!((a - b).length() < 1e-6, "{a} {b}");
+        }
+        assert!((ab - bb).abs() < 1e-6, "{ab} {bb}");
+        assert!((ah - bh).abs() < 1e-6, "{ah} {bh}");
+        match (bp, ap) {
+            (None, None) => {}
+            (Some((bo_, bx, by)), Some((ao_, ax, ay))) => {
+                assert!((ao_ - bo_).length() < 1e-6, "{ao_} {bo_}");
+                // axes to STEP's 9-decimal precision
+                assert!((ax - bx).length() < 1e-6, "{ax} {bx}");
+                assert!((ay - by).length() < 1e-6, "{ay} {by}");
+            }
+            _ => panic!("{name} lost its plane"),
+        }
+    }
+}
