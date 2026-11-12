@@ -16,6 +16,15 @@ use creabim_core::{
 use glam::{DVec2, DVec3};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use std::sync::atomic::AtomicU64;
+use std::sync::Mutex;
+
+use crate::ScriptError;
+
+/// One script runs at a time, process-wide: concurrent runs would share
+/// the `__main__` namespace and the redirected `sys.stdout`, and the
+/// GIL serializes them anyway. The app runner queues sequentially.
+static RUN_LOCK: Mutex<()> = Mutex::new(());
 
 /// A resolved input value.
 #[derive(Clone, Debug)]
@@ -158,6 +167,12 @@ pub trait ScriptEngine {
     ) -> Result<Vec<(String, Element)>, crate::ScriptError>;
 }
 
+/// A finished run: the output (or the traceback) plus captured console.
+pub struct TracedRun {
+    pub result: Result<Vec<(String, Element)>, crate::ScriptError>,
+    pub console: String,
+}
+
 /// CPython-backed [`ScriptEngine`].
 pub struct CPythonEngine {
     home: std::path::PathBuf,
@@ -167,6 +182,131 @@ impl CPythonEngine {
     pub fn new(home: std::path::PathBuf) -> Self {
         Self { home }
     }
+
+    /// Run with interruption support: the worker's Python thread id is
+    /// published in `tid` while user code runs (0 when done), so
+    /// [`engine::async_interrupt`][crate::engine::async_interrupt] can
+    /// raise into it. `print` output is captured process-wide (the
+    /// interpreter is process-global) and restored afterwards.
+    pub fn run_traced(
+        &self,
+        model: &Model,
+        script: &ScriptObject,
+        inputs: &ResolvedInputs,
+        tid: &AtomicU64,
+    ) -> TracedRun {
+        use std::sync::atomic::Ordering;
+        if script.engine != self.name() {
+            return TracedRun {
+                result: Err(crate::ScriptError::UnsupportedEngine(script.engine.clone())),
+                console: String::new(),
+            };
+        }
+        // Poison-tolerant: a panicking run must not wedge later runs.
+        let _guard = RUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(e) = crate::ensure_initialized(&self.home) {
+            return TracedRun {
+                result: Err(e),
+                console: String::new(),
+            };
+        }
+        Python::attach(|py| {
+            let (result, console) = execute(py, model, script, inputs, tid);
+            // The id must not outlive the thread, even on early exits:
+            // a stale id interrupts whoever reuses the thread next.
+            tid.store(0, Ordering::SeqCst);
+            TracedRun { result, console }
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "cpython"
+    }
+}
+
+/// Shared core: publish tid, redirect console, bind inputs, run,
+/// restore console, read outputs. Never panics; the tid is cleared
+/// by the caller.
+fn execute(
+    py: Python<'_>,
+    model: &Model,
+    script: &ScriptObject,
+    inputs: &ResolvedInputs,
+    tid: &AtomicU64,
+) -> (Result<Vec<(String, Element)>, crate::ScriptError>, String) {
+    use std::sync::atomic::Ordering;
+    let fail = |e: ScriptError| (Err(e), String::new());
+    let id: u64 = match py
+        .eval(c"__import__('threading').get_ident()", None, None)
+        .and_then(|v| v.extract())
+    {
+        Ok(id) => id,
+        Err(e) => return fail(py_err(e)),
+    };
+    tid.store(id, Ordering::SeqCst);
+    if let Err(e) = py.run(
+        c"import io as _io, sys as _sys\n_out = _io.StringIO()\n_old_out, _old_err = _sys.stdout, _sys.stderr\n_sys.stdout = _sys.stderr = _out",
+        None,
+        None,
+    ) {
+        return fail(py_err(e));
+    }
+    let main = match py.import("__main__") {
+        Ok(m) => m,
+        Err(e) => return fail(py_err(e)),
+    };
+    let bound = PyDict::new(py);
+    for (name, value) in &inputs.0 {
+        let set = match value.clone() {
+            ResolvedValue::Float(x) => bound.set_item(name.as_str(), x),
+            ResolvedValue::Int(x) => bound.set_item(name.as_str(), x),
+            ResolvedValue::Bool(x) => bound.set_item(name.as_str(), x),
+            ResolvedValue::Text(x) => bound.set_item(name.as_str(), x),
+            ResolvedValue::Element(id) => bound.set_item(name.as_str(), id.0.to_string()),
+        };
+        if let Err(e) = set {
+            return fail(py_err(e));
+        }
+    }
+    if let Err(e) = main.setattr("INPUTS", &bound) {
+        return fail(py_err(e));
+    }
+    let user_code = match std::ffi::CString::new(script.source.clone()) {
+        Ok(c) => c,
+        Err(e) => return fail(crate::ScriptError::Python(e.to_string())),
+    };
+    let ran = py.run(&user_code, None, None);
+    // Restore first: the console must survive user errors, and the
+    // restore itself must survive (best-effort read after).
+    let console = py
+        .run(
+            c"_sys.stdout, _sys.stderr = _old_out, _old_err\n_console = _out.getvalue()",
+            None,
+            None,
+        )
+        .ok()
+        .and_then(|_| main.getattr("_console").ok())
+        .and_then(|v| v.extract::<String>().ok())
+        .unwrap_or_else(|| "<console lost>".to_string());
+    if let Err(e) = ran {
+        return (Err(py_err(e)), console);
+    }
+    let items: Vec<OpItem> = match main.getattr("OUTPUTS") {
+        Ok(attr) => match attr.extract() {
+            Ok(items) => items,
+            Err(e) => return (Err(py_err(e)), console),
+        },
+        Err(_) => Vec::new(),
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for op in items {
+        let key = op.key.clone();
+        match materialize(model, &key, op) {
+            Ok(el) => out.push(el),
+            Err(e) => return (Err(crate::ScriptError::Op(e)), console),
+        }
+    }
+    (Ok(out), console)
 }
 
 impl ScriptEngine for CPythonEngine {
@@ -180,41 +320,8 @@ impl ScriptEngine for CPythonEngine {
         script: &ScriptObject,
         inputs: &ResolvedInputs,
     ) -> Result<Vec<(String, Element)>, crate::ScriptError> {
-        use crate::ScriptError::Op;
-        if script.engine != self.name() {
-            return Err(crate::ScriptError::UnsupportedEngine(script.engine.clone()));
-        }
-        crate::ensure_initialized(&self.home)?;
-        Python::attach(|py| {
-            let main = py.import("__main__").map_err(py_err)?;
-            let bound = PyDict::new(py);
-            for (name, value) in &inputs.0 {
-                match value.clone() {
-                    ResolvedValue::Float(x) => bound.set_item(name.as_str(), x),
-                    ResolvedValue::Int(x) => bound.set_item(name.as_str(), x),
-                    ResolvedValue::Bool(x) => bound.set_item(name.as_str(), x),
-                    ResolvedValue::Text(x) => bound.set_item(name.as_str(), x),
-                    ResolvedValue::Element(id) => bound.set_item(name.as_str(), id.0.to_string()),
-                }
-                .map_err(py_err)?;
-            }
-            main.setattr("INPUTS", &bound).map_err(py_err)?;
-            py.run(
-                &std::ffi::CString::new(script.source.clone())
-                    .map_err(|e| crate::ScriptError::Python(e.to_string()))?,
-                None,
-                None,
-            )
-            .map_err(py_err)?;
-            let items: Vec<OpItem> = match main.getattr("OUTPUTS") {
-                Ok(attr) => attr.extract().map_err(py_err)?,
-                Err(_) => Vec::new(),
-            };
-            items
-                .into_iter()
-                .map(|op| materialize(model, op).map_err(Op))
-                .collect()
-        })
+        self.run_traced(model, script, inputs, &AtomicU64::new(0))
+            .result
     }
 }
 
@@ -222,11 +329,11 @@ fn py_err(e: PyErr) -> crate::ScriptError {
     crate::ScriptError::Python(e.to_string())
 }
 
-fn materialize(model: &Model, op: OpItem) -> Result<(String, Element), String> {
+fn materialize(model: &Model, key: &str, op: OpItem) -> Result<(String, Element), String> {
     match (op.wall, op.mesh) {
-        (Some(w), None) => materialize_wall(model, &op.key, w),
-        (None, Some(m)) => materialize_mesh(&op.key, m),
-        _ => Err(format!("op {:?}: exactly one of wall/mesh", op.key)),
+        (Some(w), None) => materialize_wall(model, key, w),
+        (None, Some(m)) => materialize_mesh(key, m),
+        _ => Err(format!("op {key:?}: exactly one of wall/mesh")),
     }
 }
 
@@ -388,5 +495,36 @@ mod tests {
             outputs2.iter().map(|o| o.id).collect::<Vec<_>>(),
             outputs.iter().map(|o| o.id).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn interrupt_stops_a_runaway() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::{Duration, Instant};
+        let home = crate::ensure_provisioned().expect("provision the bundle");
+        crate::ensure_packages(&["numpy"]).expect("install numpy");
+        let engine = CPythonEngine::new(home);
+        let model = Model::new();
+        let script = ScriptObject::new("print(\"start\")\nwhile True:\n    pass\n", "cpython");
+        let inputs = ResolvedInputs(vec![]);
+        let tid = AtomicU64::new(0);
+        std::thread::scope(|s| {
+            let worker = s.spawn(|| engine.run_traced(&model, &script, &inputs, &tid));
+            let start = Instant::now();
+            while tid.load(Ordering::SeqCst) == 0 {
+                if start.elapsed() > Duration::from_secs(10) {
+                    panic!("worker never reached user code");
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(crate::async_interrupt(tid.load(Ordering::SeqCst)));
+            let done = worker.join().expect("worker survives interrupt");
+            assert!(
+                matches!(done.result, Err(crate::ScriptError::Python(_))),
+                "runaway ends in an error"
+            );
+            assert!(done.console.contains("start"), "console survives interrupt");
+            assert_eq!(tid.load(Ordering::SeqCst), 0, "tid cleared");
+        });
     }
 }

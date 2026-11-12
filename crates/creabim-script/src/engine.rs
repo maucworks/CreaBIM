@@ -71,6 +71,40 @@ pub fn ensure_initialized(home: &Path) -> Result<String, ScriptError> {
     })
 }
 
+/// Raise `KeyboardInterrupt` in the thread running `tid` (a
+/// `threading.get_ident()` value).
+///
+/// Attaches first: CPython 3.13 dereferences the *calling* thread's
+/// state inside `SetAsyncExc`, so the no-GIL recipe segfaults. The
+/// attach waits at most one GIL switch interval (~5 ms) behind a pure
+/// Python runaway, which yields the GIL on every interval; a C call
+/// that never yields still blocks it (same class as Blender/Rhino —
+/// subprocess isolation remains the documented fallback).
+/// Returns whether exactly one thread was hit; a stale id hits none.
+pub fn async_interrupt(tid: u64) -> bool {
+    if tid == 0 {
+        return false;
+    }
+    Python::attach(|py| {
+        let _ = py;
+        // `PyExc_KeyboardInterrupt` is immortal; no refcount applies.
+        // `c_long` fits OS thread ids on every target (DWORD on
+        // Windows, pthread word elsewhere).
+        let exc = unsafe { pyo3::ffi::PyExc_KeyboardInterrupt };
+        let hit = unsafe { pyo3::ffi::PyThreadState_SetAsyncExc(tid as std::os::raw::c_long, exc) };
+        if hit > 1 {
+            unsafe {
+                pyo3::ffi::PyThreadState_SetAsyncExc(
+                    tid as std::os::raw::c_long,
+                    std::ptr::null_mut(),
+                )
+            };
+            return false;
+        }
+        hit == 1
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -23,5 +23,8 @@ pub use creabim_provision::{
     ensure as ensure_provisioned, ensure_packages, home_under, site_dir_for, ProvisionError,
     PINNED_PYTHON, PINNED_TAG,
 };
-pub use engine::{ensure_initialized, ScriptError};
-pub use run::{resolve, run_to_transaction, CPythonEngine, ResolvedInputs, ScriptEngine};
+pub use engine::{async_interrupt, ensure_initialized, ScriptError};
+pub use run::{
+    resolve, run_to_transaction, CPythonEngine, ResolvedInputs, ResolvedValue, ScriptEngine,
+    TracedRun,
+};
