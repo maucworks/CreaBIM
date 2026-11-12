@@ -1,0 +1,15 @@
+[package]
+name = "creabim-script"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[build-dependencies]
+creabim-provision.workspace = true
+
+[dependencies]
+creabim-provision.workspace = true
+pyo3 = "0.30"
+thiserror.workspace = true
