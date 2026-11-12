@@ -957,6 +957,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "creabim-nurbs"
+version = "1.1.0"
+dependencies = [
+ "geometrykit-core",
+ "glam",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "creabim-spec"
 version = "1.1.1"
 dependencies = [
@@ -1725,6 +1734,12 @@ dependencies = [
  "typenum",
  "version_check",
 ]
+
+[[package]]
+name = "geometrykit-core"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65dcbb8dac650c942d77eae02b9d04a4bfb5120593bd68c3dcfa8e640ff3d94f"
 
 [[package]]
 name = "gethostname"
