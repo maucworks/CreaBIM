@@ -527,4 +527,32 @@ mod tests {
             assert_eq!(tid.load(Ordering::SeqCst), 0, "tid cleared");
         });
     }
+
+    const BIARC_SCRIPT: &str = "from geometrykit.geometry import Curve\nfrom geometrykit.geometry.primitives import Vec\nc = Curve.from_tangents(Vec(0, 0, 2.5), Vec(1, 0, 0), Vec(8, 0, 3.0), Vec(1, 0, 0), scale=3.0)\np = c.to_biarcs(tol=0.01, max_iteration=5)\narcs = [s for s in p.segments if hasattr(s, \"radius\")]\nassert len(arcs) > 0, \"expected arc segments\"\nassert all(a.radius > 0 for a in arcs)\nOUTPUTS = [{\"key\": \"probe\", \"mesh\": {\"verts\": [[0, 0, 0], [1, 0, 0], [0, 1, 0]], \"faces\": [[0, 1, 2]]}}]\n";
+
+    #[test]
+    fn geometrykit_biarcs_run_embedded() {
+        let home = crate::ensure_provisioned().expect("provision the bundle");
+        crate::ensure_packages(&["geometrykit"]).expect("install geometrykit");
+        let engine = CPythonEngine::new(home);
+        let mut script = ScriptObject::new(BIARC_SCRIPT, "cpython");
+        script.requirements = vec!["geometrykit".to_string()];
+        let mut doc = Document::from_model(Model::new());
+        let script_el = Element::new("biarcs", ElementKind::ScriptObject(script.clone()));
+        let id = script_el.id;
+        doc.commit(Transaction::new("script").insert(script_el))
+            .expect("add the script");
+        let model = doc.model().clone();
+        let script = match &model.get(id).unwrap().kind {
+            ElementKind::ScriptObject(s) => s.clone(),
+            _ => panic!("not a script"),
+        };
+        let inputs = ResolvedInputs(vec![]);
+        let (tx, outputs) =
+            run_to_transaction(&engine, &model, id, &script, &inputs, "script:test")
+                .expect("run the biarc script");
+        assert_eq!(outputs.len(), 1);
+        doc.commit(tx).expect("commit the probe mesh");
+        assert_eq!(doc.model().iter().count(), 2);
+    }
 }

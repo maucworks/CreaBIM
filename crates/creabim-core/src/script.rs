@@ -89,6 +89,11 @@ pub struct ScriptObject {
     pub engine: String,
     pub inputs: Vec<ParamInput>,
     pub outputs: Vec<ScriptOutput>,
+    /// pip requirements installed into the app-managed site-packages
+    /// before running (M-S3; e.g. `geometrykit`, which pulls numpy).
+    /// Absent in older files.
+    #[serde(default)]
+    pub requirements: Vec<String>,
 }
 
 impl ScriptObject {
@@ -98,6 +103,7 @@ impl ScriptObject {
             engine: engine.into(),
             inputs: vec![],
             outputs: vec![],
+            requirements: vec![],
         }
     }
 

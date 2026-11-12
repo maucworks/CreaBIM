@@ -71,6 +71,7 @@ usage: (<model> is a .creabim project or a legacy .creabim.json file)
                                        run a script block, committing its
                                        outputs as one undoable step
   creabim script add <model> <name> <file.py> [--out <model>] [--engine e]
+                                       [--require pkg ...]
                                        add a script block from a file
   creabim stats <model>                count elements by IFC class
   creabim check <model>                list objects standing in doorways or in
@@ -532,7 +533,10 @@ fn script_run(input: &str, name: &str, rest: &[&str]) -> Result<(), String> {
         .declared()
         .map_err(|e| format!("{}: {e}", found.name))?;
     let home = creabim_script::ensure_provisioned().map_err(|e| e.to_string())?;
-    creabim_script::ensure_packages(&["numpy"]).map_err(|e| e.to_string())?;
+    let reqs: Vec<&str> = script.requirements.iter().map(String::as_str).collect();
+    if !reqs.is_empty() {
+        creabim_script::ensure_packages(&reqs).map_err(|e| e.to_string())?;
+    }
     let engine = creabim_script::CPythonEngine::new(home);
     let inputs = creabim_script::resolve(&model, &decls, &script.inputs, &params)
         .map_err(|e| e.to_string())?;
@@ -563,6 +567,7 @@ fn script_run(input: &str, name: &str, rest: &[&str]) -> Result<(), String> {
 fn script_add(input: &str, name: &str, source: &str, rest: &[&str]) -> Result<(), String> {
     let mut out = input.to_string();
     let mut engine = "cpython".to_string();
+    let mut requirements = vec![];
     let mut it = rest.iter();
     while let Some(flag) = it.next() {
         match *flag {
@@ -578,11 +583,19 @@ fn script_add(input: &str, name: &str, source: &str, rest: &[&str]) -> Result<()
                     .ok_or_else(|| "--engine needs a value".to_string())?
                     .to_string()
             }
+            "--require" => {
+                requirements.push(
+                    it.next()
+                        .ok_or_else(|| "--require needs a package".to_string())?
+                        .to_string(),
+                );
+            }
             other => return Err(format!("unknown flag {other:?}")),
         }
     }
     let text = read_text(source)?;
-    let script = creabim_core::ScriptObject::new(text, engine);
+    let mut script = creabim_core::ScriptObject::new(text, engine);
+    script.requirements = requirements;
     script.validate().map_err(|e| format!("{source}: {e}"))?;
     let mut doc = Document::from_model(load(input)?);
     doc.commit(

@@ -469,7 +469,10 @@ impl ScriptRunner {
             let t0 = Instant::now();
             let outcome = (|| {
                 let home = ensure_provisioned().map_err(|e| e.to_string())?;
-                ensure_packages(&["numpy"]).map_err(|e| e.to_string())?;
+                let reqs: Vec<&str> = script.requirements.iter().map(String::as_str).collect();
+                if !reqs.is_empty() {
+                    ensure_packages(&reqs).map_err(|e| e.to_string())?;
+                }
                 Ok::<_, String>(home)
             })();
             let result = match outcome {
