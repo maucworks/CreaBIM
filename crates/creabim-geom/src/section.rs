@@ -1066,7 +1066,7 @@ fn convex_hull(mut pts: Vec<DVec2>) -> Vec<DVec2> {
 
 fn view_key(view: ElementId) -> u64 {
     use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut h = creabim_core::hash::StableHasher::new();
     view.hash(&mut h);
     h.finish()
 }

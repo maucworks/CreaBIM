@@ -1465,7 +1465,7 @@ struct EdgeMemo {
 
 fn fingerprint(mesh: &creabim_geom::mesh::TriMesh) -> u64 {
     use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut h = creabim_core::hash::StableHasher::new();
     mesh.indices.hash(&mut h);
     for p in &mesh.positions {
         for c in p {

@@ -21,6 +21,7 @@ pub mod footing;
 pub mod garden;
 pub mod graphics;
 pub mod grids;
+pub mod hash;
 pub mod holds;
 pub mod id;
 pub mod joins;

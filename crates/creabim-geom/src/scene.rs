@@ -784,10 +784,11 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
-/// A fingerprint of a mesh's shape.
+/// A fingerprint of a mesh's shape (stable across calls, unlike
+/// [`std::collections::hash_map::DefaultHasher`]).
 fn mesh_key(m: &TriMesh) -> u64 {
     use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut h = creabim_core::hash::StableHasher::new();
     m.indices.hash(&mut h);
     for p in &m.positions {
         for v in p {

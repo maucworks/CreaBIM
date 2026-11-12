@@ -105,7 +105,7 @@ pub fn stored_image(width: u32, height: u32, data: &str) -> Option<std::sync::Ar
     use std::hash::{Hash, Hasher};
     use std::sync::{Arc, Mutex, OnceLock};
     static SEEN: OnceLock<Mutex<HashMap<u64, Arc<Raster>>>> = OnceLock::new();
-    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut h = creabim_core::hash::StableHasher::new();
     (width, height, data).hash(&mut h);
     let key = h.finish();
     let seen = SEEN.get_or_init(Default::default);

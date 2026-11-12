@@ -1455,7 +1455,14 @@ impl CreaBimApp {
 
     /// Fit the 3D view round the whole model.
     fn frame_3d(&mut self) {
+        // TEMP-DIAG: synchronous full-scene build on the UI thread.
+        eprintln!("[diag] 3d: frame_3d start");
+        let t = std::time::Instant::now();
         let scene = (*creabim_geom::shared_scene(self.doc.model())).clone();
+        eprintln!(
+            "[diag] 3d: frame_3d scene ready in {:.0} ms",
+            t.elapsed().as_secs_f64() * 1000.0
+        );
         let bounds = scene
             .iter()
             .filter_map(|s| s.mesh.bounds())
@@ -2317,7 +2324,17 @@ impl CreaBimApp {
         let (scene_rev, scene) = match creabim_geom::shared_scene_ready(model) {
             Some(s) => (model.revision(), s),
             None if shown.is_none() || !self.builds.enabled() => {
-                (model.revision(), creabim_geom::shared_scene(model))
+                // TEMP-DIAG for the 3D-view beachball: sync builds block
+                // the UI thread; log before/after so a hang is located.
+                let rev = model.revision();
+                eprintln!("[diag] 3d: sync scene build start (rev {rev})");
+                let t = std::time::Instant::now();
+                let s = creabim_geom::shared_scene(model);
+                eprintln!(
+                    "[diag] 3d: sync scene built in {:.0} ms",
+                    t.elapsed().as_secs_f64() * 1000.0
+                );
+                (model.revision(), s)
             }
             None => {
                 self.builds.start_scene(model);

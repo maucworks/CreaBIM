@@ -269,9 +269,11 @@ impl ScriptRunner {
                     if timed_out {
                         entry.status = Status::TimedOut;
                         crate::actlog::line(format!("script {run_name}: timed out"));
+                        eprintln!("[diag] script {run_name}: timed out");
                     } else if cancel_asked {
                         entry.status = Status::Cancelled;
                         crate::actlog::line(format!("script {run_name}: cancelled"));
+                        eprintln!("[diag] script {run_name}: cancelled");
                     } else {
                         changed |= self.commit(doc, done.script_id, done.key, fresh, done.ms);
                     }
@@ -281,12 +283,15 @@ impl ScriptRunner {
                     if timed_out {
                         entry.status = Status::TimedOut;
                         crate::actlog::line(format!("script {run_name}: timed out"));
+                        eprintln!("[diag] script {run_name}: timed out");
                     } else if cancel_asked {
                         entry.status = Status::Cancelled;
                         crate::actlog::line(format!("script {run_name}: cancelled"));
+                        eprintln!("[diag] script {run_name}: cancelled");
                     } else {
                         entry.status = Status::Failed { traceback };
                         crate::actlog::line(format!("script {run_name}: failed"));
+                        eprintln!("[diag] script {run_name}: failed");
                     }
                 }
             }
@@ -362,12 +367,14 @@ impl ScriptRunner {
                 crate::actlog::line(format!(
                     "script {name}: ok in {ms} ms (+{added} ~{replaced} -{removed})"
                 ));
+                eprintln!("[diag] script {name}: ok in {ms} ms (+{added} ~{replaced} -{removed})");
             }
             Err(e) => {
                 entry.status = Status::Failed {
                     traceback: format!("commit failed: {e}"),
                 };
                 crate::actlog::line(format!("script {name}: commit failed"));
+                eprintln!("[diag] script {name}: commit failed");
             }
         }
         true
@@ -482,6 +489,8 @@ impl ScriptRunner {
             .map(|e| e.name.clone())
             .unwrap_or_default();
         crate::actlog::line(format!("script {name}: recompute started"));
+        // TEMP-DIAG: mirror to stderr so a frozen UI still leaves a trace.
+        eprintln!("[diag] script {name}: recompute started");
         let snapshot = Arc::new(doc.model().clone());
         let tid = Arc::new(AtomicU64::new(0));
         let worker = tid.clone();
@@ -558,11 +567,18 @@ fn unchanged(model: &Model, prev: &[ScriptOutput], fresh: &[(String, Element)]) 
     if fresh.len() != prev.len() {
         return false;
     }
+    // Compare content, not identity: fresh elements carry new ids that
+    // reconcile() maps onto the stored ones. Comparing ids would make
+    // every re-run look changed and commit forever.
     fresh.iter().all(|(key, el)| {
         prev.iter()
             .find(|o| &o.key == key)
-            .and_then(|o| model.get(o.id))
-            .is_some_and(|cur| cur == el)
+            .and_then(|o| model.get(o.id).map(|cur| (o, cur)))
+            .is_some_and(|(o, cur)| {
+                let mut el = el.clone();
+                el.id = o.id;
+                cur == &el
+            })
     })
 }
 
