@@ -34,6 +34,23 @@ jobs:
             sleep 20
           done
           exit 1
+      - name: Provision embedded Python
+        # creabim-script links the bundled libpython (never a system one):
+        # download+verify first, then point PyO3 at it for every later step.
+        run: |
+          cargo run -p creabim-provision
+          HOME_DIR="${{ runner.temp }}/creabim-python/python"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            echo "PYO3_PYTHON=$HOME_DIR/python.exe" >> $GITHUB_ENV
+            echo "$HOME_DIR" >> $GITHUB_PATH
+            echo "$HOME_DIR/DLLs" >> $GITHUB_PATH
+          else
+            echo "PYO3_PYTHON=$HOME_DIR/bin/python3.13" >> $GITHUB_ENV
+            echo "LD_LIBRARY_PATH=$HOME_DIR/lib" >> $GITHUB_ENV
+          fi
+        env:
+          CREABIM_PYTHON_HOME: ${{ runner.temp }}/creabim-python
+        shell: bash
       - name: Format
         if: runner.os == 'Linux'
         run: cargo fmt --all --check

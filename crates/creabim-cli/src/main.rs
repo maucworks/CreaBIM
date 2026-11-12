@@ -70,6 +70,8 @@ usage: (<model> is a .creabim project or a legacy .creabim.json file)
   creabim script run <model> <name|id> [--out <model>] [--param k=v ...]
                                        run a script block, committing its
                                        outputs as one undoable step
+  creabim script add <model> <name> <file.py> [--out <model>] [--engine e]
+                                       add a script block from a file
   creabim stats <model>                count elements by IFC class
   creabim check <model>                list objects standing in doorways or in
                                        a door's swing, and wall layers moved
@@ -358,31 +360,32 @@ fn main() -> ExitCode {
         ["import-ifc", input, out] => read_text(input)
             .and_then(|text| import_ifc(&text).map_err(|e| format!("{input}: {e}")))
             .and_then(|r| save_import(r, out)),
-        ["script", "list", input] => load(input).and_then(|m| {
-            let mut n = 0;
-            for e in m.iter() {
-                if let creabim_core::ElementKind::ScriptObject(s) = &e.kind {
-                    n += 1;
-                    let status = match s.declared() {
-                        Ok(d) => format!("{} inputs", d.len()),
-                        Err(e) => format!("bad header: {e}"),
-                    };
-                    println!(
-                        "{} {} engine={} {} outputs={}",
-                        e.name,
-                        e.id.0,
-                        s.engine,
-                        status,
-                        s.outputs.len()
-                    );
+        ["script", "list", input] => load(input)
+            .map(|m| {
+                let mut n = 0;
+                for e in m.iter() {
+                    if let creabim_core::ElementKind::ScriptObject(s) = &e.kind {
+                        n += 1;
+                        let status = match s.declared() {
+                            Ok(d) => format!("{} inputs", d.len()),
+                            Err(e) => format!("bad header: {e}"),
+                        };
+                        println!(
+                            "{} {} engine={} {} outputs={}",
+                            e.name,
+                            e.id.0,
+                            s.engine,
+                            status,
+                            s.outputs.len()
+                        );
+                    }
                 }
-            }
-            if n == 0 {
-                println!("no script blocks");
-            }
-            Ok(())
-        }),
+                if n == 0 {
+                    println!("no script blocks");
+                }
+            }),
         ["script", "run", input, name, rest @ ..] => script_run(input, name, rest),
+        ["script", "add", input, name, source, rest @ ..] => script_add(input, name, source, rest),
         ["ifcx", input, out] => load(input)
             .and_then(|m| std::fs::write(out, export_ifcx(&m)).map_err(|e| e.to_string())),
         ["import-ifcx", input, out] => read_text(input)
@@ -534,15 +537,9 @@ fn script_run(input: &str, name: &str, rest: &[&str]) -> Result<(), String> {
     let inputs = creabim_script::resolve(&model, &decls, &script.inputs, &params)
         .map_err(|e| e.to_string())?;
     let label = format!("script {}", found.name);
-    let (tx, _) = creabim_script::run_to_transaction(
-        &engine,
-        &model,
-        script_id,
-        &script,
-        &inputs,
-        &label,
-    )
-    .map_err(|e| e.to_string())?;
+    let (tx, _) =
+        creabim_script::run_to_transaction(&engine, &model, script_id, &script, &inputs, &label)
+            .map_err(|e| e.to_string())?;
     let (mut added, mut replaced, mut removed) = (0, 0, 0);
     for op in &tx.ops {
         match op {
@@ -559,6 +556,47 @@ fn script_run(input: &str, name: &str, rest: &[&str]) -> Result<(), String> {
         creabim_store::save(&out, &doc).map_err(|e| format!("{out}: {e}"))
     }?;
     println!("{label}: {added} added, {replaced} replaced, {removed} removed");
+    Ok(())
+}
+
+/// Add a script block from a Python file, validating its header.
+fn script_add(input: &str, name: &str, source: &str, rest: &[&str]) -> Result<(), String> {
+    let mut out = input.to_string();
+    let mut engine = "cpython".to_string();
+    let mut it = rest.iter();
+    while let Some(flag) = it.next() {
+        match *flag {
+            "--out" => {
+                out = it
+                    .next()
+                    .ok_or_else(|| "--out needs a value".to_string())?
+                    .to_string()
+            }
+            "--engine" => {
+                engine = it
+                    .next()
+                    .ok_or_else(|| "--engine needs a value".to_string())?
+                    .to_string()
+            }
+            other => return Err(format!("unknown flag {other:?}")),
+        }
+    }
+    let text = read_text(source)?;
+    let script = creabim_core::ScriptObject::new(text, engine);
+    script.validate().map_err(|e| format!("{source}: {e}"))?;
+    let mut doc = Document::from_model(load(input)?);
+    doc.commit(
+        creabim_core::Transaction::new(format!("add script {name}")).insert(
+            creabim_core::Element::new(name, creabim_core::ElementKind::ScriptObject(script)),
+        ),
+    )
+    .map_err(|e| e.to_string())?;
+    if is_json(&out) {
+        std::fs::write(&out, doc.model().to_json()).map_err(|e| format!("{out}: {e}"))
+    } else {
+        creabim_store::save(&out, &doc).map_err(|e| format!("{out}: {e}"))
+    }?;
+    println!("added script block {name:?}");
     Ok(())
 }
 

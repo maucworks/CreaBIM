@@ -124,7 +124,10 @@ pub fn parse_front_matter(source: &str) -> Result<Vec<ParamDecl>, String> {
             Some(r) => r.trim_start(),
             None => continue,
         };
-        let rest = match rest.strip_prefix("in:").or_else(|| rest.strip_prefix("in ")) {
+        let rest = match rest
+            .strip_prefix("in:")
+            .or_else(|| rest.strip_prefix("in "))
+        {
             Some(r) => r.trim_start(),
             None => continue,
         };
@@ -267,7 +270,10 @@ mod tests {
             &model,
             "script:test",
             &[],
-            vec![("a".into(), mesh_named("m-a")), ("b".into(), mesh_named("m-b"))],
+            vec![
+                ("a".into(), mesh_named("m-a")),
+                ("b".into(), mesh_named("m-b")),
+            ],
         );
         assert_eq!(tx.ops.len(), 2);
         assert!(tx.ops.iter().all(|o| matches!(o, Op::Insert(_))));
