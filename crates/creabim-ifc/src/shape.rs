@@ -1950,6 +1950,48 @@ mod tests {
     }
 
     #[test]
+    fn an_ishape_profile_matches_the_steel_sections_reference() {
+        // IPE 200 (200 x 100 x 5.6 x 8.5, r12): the CreaBIM ISHAPE arm
+        // must reproduce the catalogue's coarse loop exactly — centred,
+        // CCW, minimum corner first. Reference: steel-sections
+        // reference-vectors.json. Dims source: ArcelorMittal Sales
+        // Programme V2026-1.
+        let f = geo(
+            "#1=IFCISHAPEPROFILEDEF(.AREA.,$,#2,100.,200.,5.6,8.5);\
+            #2=IFCCARTESIANPOINT((0.,0.));#3=IFCDIRECTION((1.,0.));\
+            #4=IFCAXIS2PLACEMENT2D(#2,#3);",
+        );
+        let mut g = Geo::new(&f, 1.0, 1.0);
+        let regions = g.profile(&Value::Ref(1));
+        let [region] = &regions[..] else {
+            panic!("expected one region");
+        };
+        let expected = [
+            (-50.0, -100.0),
+            (50.0, -100.0),
+            (50.0, -91.5),
+            (2.8, -91.5),
+            (2.8, 91.5),
+            (50.0, 91.5),
+            (50.0, 100.0),
+            (-50.0, 100.0),
+            (-50.0, 91.5),
+            (-2.8, 91.5),
+            (-2.8, -91.5),
+            (-50.0, -91.5),
+        ];
+        assert_eq!(region.outer.len(), expected.len());
+        for (got, want) in region.outer.iter().zip(&expected) {
+            assert!(
+                (got.x - want.0).abs() < 1e-9 && (got.y - want.1).abs() < 1e-9,
+                "{got:?} != {want:?}"
+            );
+        }
+        let area = creabim_core::polygon::signed_area2(&region.outer).abs() / 2.0;
+        assert!((area - 2724.8).abs() < 1e-6, "{area}");
+    }
+
+    #[test]
     fn a_revolved_solid_off_the_sweepable_config_stays_a_mesh() {
         // the turn axis off the profile plane: a0 with a z, a tilted dir.
         // Each solid wrapped in a beam product, as revolved_sweep takes one.
