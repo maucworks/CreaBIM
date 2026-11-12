@@ -134,6 +134,8 @@ pub struct CreaBimApp {
     drawings: HashMap<ElementId, (u64, Drawing)>,
     /// Drawings and the 3D scene being built off the UI thread.
     builds: crate::builds::Builds,
+    /// Script blocks recomputed off the UI thread.
+    scripts: crate::scriptrun::ScriptRunner,
     /// Each view's looks on sheets, with the model revision they are for.
     looks: HashMap<ElementId, (u64, std::sync::Arc<creabim_geom::looks::Looks>)>,
     /// The same for views seen in X-ray, which their sheets don't follow.
@@ -390,6 +392,7 @@ impl CreaBimApp {
             area_now: 0,
             drawings: HashMap::new(),
             builds: Default::default(),
+            scripts: Default::default(),
             looks: HashMap::new(),
             xray_drawings: HashMap::new(),
             dark_3d: true,
@@ -9650,15 +9653,11 @@ impl CreaBimApp {
                     }
                 }
                 ElementKind::ScriptObject(s) => {
-                    ui.label(format!("Engine: {}", s.engine));
-                    ui.label(format!(
-                        "{} input{}, {} output{}",
-                        s.inputs.len(),
-                        if s.inputs.len() == 1 { "" } else { "s" },
-                        s.outputs.len(),
-                        if s.outputs.len() == 1 { "" } else { "s" },
-                    ));
-                    ui.label("Scripts run from the command line for now.");
+                    if let Some(l) =
+                        crate::scriptui::script_panel(ui, &mut self.scripts, &self.doc, id, s)
+                    {
+                        label = l;
+                    }
                 }
                 ElementKind::Reference(r) => {
                     if let Some(l) = self.reference_fields(ui, id, r) {
@@ -10992,6 +10991,12 @@ impl eframe::App for CreaBimApp {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.close_ask = true;
+        }
+        // script blocks recompute off the UI thread; a finished run
+        // repaints so the panel and the views pick it up
+        let (scripts, doc) = (&mut self.scripts, &mut self.doc);
+        if scripts.poll(doc) {
+            ui.ctx().request_repaint();
         }
         let ctx = ui.ctx().clone();
         crate::trace::hold(ctx.input(|i| i.pointer.any_down()));

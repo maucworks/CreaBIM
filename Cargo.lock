@@ -865,6 +865,7 @@ dependencies = [
  "creabim-exchange",
  "creabim-geom",
  "creabim-ifc",
+ "creabim-script",
  "creabim-store",
  "eframe",
  "glam",
