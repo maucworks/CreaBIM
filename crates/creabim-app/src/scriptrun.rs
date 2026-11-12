@@ -258,13 +258,20 @@ impl ScriptRunner {
             // Terminal for this key either way: without recording it,
             // the next poll sees a dirty script and respawns immediately.
             entry.last_key = Some(done.key.clone());
+            let run_name = doc
+                .model()
+                .get(done.script_id)
+                .map(|e| e.name.clone())
+                .unwrap_or_default();
             match done.result {
                 Ok((fresh, console)) => {
                     entry.console = truncate(console);
                     if timed_out {
                         entry.status = Status::TimedOut;
+                        crate::actlog::line(format!("script {run_name}: timed out"));
                     } else if cancel_asked {
                         entry.status = Status::Cancelled;
+                        crate::actlog::line(format!("script {run_name}: cancelled"));
                     } else {
                         changed |= self.commit(doc, done.script_id, done.key, fresh, done.ms);
                     }
@@ -273,10 +280,13 @@ impl ScriptRunner {
                     entry.console = truncate(console);
                     if timed_out {
                         entry.status = Status::TimedOut;
+                        crate::actlog::line(format!("script {run_name}: timed out"));
                     } else if cancel_asked {
                         entry.status = Status::Cancelled;
+                        crate::actlog::line(format!("script {run_name}: cancelled"));
                     } else {
                         entry.status = Status::Failed { traceback };
+                        crate::actlog::line(format!("script {run_name}: failed"));
                     }
                 }
             }
@@ -336,6 +346,7 @@ impl ScriptRunner {
         };
         let mut after = before.clone();
         after.kind = ElementKind::ScriptObject(updated);
+        let name = after.name.clone();
         let tx = tx.replace(before, after);
         let entry = self.entry(script_id);
         match doc.commit(tx) {
@@ -348,11 +359,15 @@ impl ScriptRunner {
                     replaced,
                     removed,
                 };
+                crate::actlog::line(format!(
+                    "script {name}: ok in {ms} ms (+{added} ~{replaced} -{removed})"
+                ));
             }
             Err(e) => {
                 entry.status = Status::Failed {
                     traceback: format!("commit failed: {e}"),
                 };
+                crate::actlog::line(format!("script {name}: commit failed"));
             }
         }
         true
@@ -433,6 +448,7 @@ impl ScriptRunner {
                 let entry = self.entry(id);
                 entry.status = Status::Failed { traceback: e };
                 entry.last_key = Some(key);
+                entry.last_revision = revision;
                 return true;
             }
         };
@@ -444,6 +460,7 @@ impl ScriptRunner {
                     traceback: e.to_string(),
                 };
                 entry.last_key = Some(key);
+                entry.last_revision = revision;
                 return true;
             }
         };
@@ -459,6 +476,12 @@ impl ScriptRunner {
         script: ScriptObject,
         inputs: ResolvedInputs,
     ) {
+        let name = doc
+            .model()
+            .get(id)
+            .map(|e| e.name.clone())
+            .unwrap_or_default();
+        crate::actlog::line(format!("script {name}: recompute started"));
         let snapshot = Arc::new(doc.model().clone());
         let tid = Arc::new(AtomicU64::new(0));
         let worker = tid.clone();
