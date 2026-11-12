@@ -5,7 +5,8 @@
 //! transaction. Native op vocabulary only (walls, meshes).
 //!
 //! Build-time setup is two steps (PyO3 links the interpreter it is
-//! told about, so the bundle must exist first):
+//! told about, so the bundle must exist first). The Makefile does both
+//! (`make build`, `make test`, ...); manually:
 //!
 //! ```sh
 //! cargo run -p creabim-provision
