@@ -45,6 +45,7 @@ pub mod regions;
 pub mod room;
 pub mod sample;
 pub mod screen;
+pub mod script;
 pub mod site;
 pub mod sketch;
 pub mod slab;
@@ -96,6 +97,10 @@ pub use project::{set_project, ProjectInfo};
 pub use reference::{RefSource, Reference};
 pub use room::{Ceiling, Room, RoomField, Separator};
 pub use screen::ScreenPattern;
+pub use script::{
+    parse_front_matter, reconcile, ParamDecl, ParamInput, ParamKind, ParamValue, ScriptObject,
+    ScriptOutput,
+};
 pub use site::{PlantForm, Site, SiteForm};
 pub use sketch::{bulge_through, Circle, Curve, SegmentKind};
 pub use slab::{room_outline, slab_from_sketch, Shaft};

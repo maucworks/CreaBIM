@@ -502,7 +502,8 @@ pub fn transformed(model: &Model, e: &Element, t: &Xform) -> Option<Element> {
         | ElementKind::Cut(_)
         | ElementKind::Join(_)
         | ElementKind::ElementType(_)
-        | ElementKind::GridGroup(_) => return None,
+        | ElementKind::GridGroup(_)
+        | ElementKind::ScriptObject(_) => return None,
     }
     Some(out)
 }

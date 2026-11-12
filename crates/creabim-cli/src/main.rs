@@ -66,6 +66,10 @@ usage: (<model> is a .creabim project or a legacy .creabim.json file)
                                        each as a .json file to start one from
   creabim schedule <model> <doors|windows|walls|slabs|rooms> [out.csv]
                                        print or save a schedule as CSV
+  creabim script list <model>          list the model's script blocks
+  creabim script run <model> <name|id> [--out <model>] [--param k=v ...]
+                                       run a script block, committing its
+                                       outputs as one undoable step
   creabim stats <model>                count elements by IFC class
   creabim check <model>                list objects standing in doorways or in
                                        a door's swing, and wall layers moved
@@ -354,6 +358,31 @@ fn main() -> ExitCode {
         ["import-ifc", input, out] => read_text(input)
             .and_then(|text| import_ifc(&text).map_err(|e| format!("{input}: {e}")))
             .and_then(|r| save_import(r, out)),
+        ["script", "list", input] => load(input).and_then(|m| {
+            let mut n = 0;
+            for e in m.iter() {
+                if let creabim_core::ElementKind::ScriptObject(s) = &e.kind {
+                    n += 1;
+                    let status = match s.declared() {
+                        Ok(d) => format!("{} inputs", d.len()),
+                        Err(e) => format!("bad header: {e}"),
+                    };
+                    println!(
+                        "{} {} engine={} {} outputs={}",
+                        e.name,
+                        e.id.0,
+                        s.engine,
+                        status,
+                        s.outputs.len()
+                    );
+                }
+            }
+            if n == 0 {
+                println!("no script blocks");
+            }
+            Ok(())
+        }),
+        ["script", "run", input, name, rest @ ..] => script_run(input, name, rest),
         ["ifcx", input, out] => load(input)
             .and_then(|m| std::fs::write(out, export_ifcx(&m)).map_err(|e| e.to_string())),
         ["import-ifcx", input, out] => read_text(input)
@@ -459,6 +488,78 @@ fn save_import(r: ImportResult, out: &str) -> Result<(), String> {
     } else {
         creabim_store::save(out, &Document::from_model(r.model)).map_err(|e| format!("{out}: {e}"))
     }
+}
+
+/// Run a script block, committing its outputs as one undoable step.
+fn script_run(input: &str, name: &str, rest: &[&str]) -> Result<(), String> {
+    let mut out = input.to_string();
+    let mut params: Vec<(String, String)> = vec![];
+    let mut it = rest.iter();
+    while let Some(flag) = it.next() {
+        match *flag {
+            "--out" => {
+                out = it
+                    .next()
+                    .ok_or_else(|| "--out needs a value".to_string())?
+                    .to_string()
+            }
+            "--param" => {
+                let kv = it
+                    .next()
+                    .ok_or_else(|| "--param needs key=value".to_string())?;
+                let (k, v) = kv
+                    .split_once('=')
+                    .ok_or_else(|| format!("--param {kv:?} is not key=value"))?;
+                params.push((k.to_string(), v.to_string()));
+            }
+            other => return Err(format!("unknown flag {other:?}")),
+        }
+    }
+    let model = load(input)?;
+    let found = model
+        .iter()
+        .find(|e| e.name == *name || e.id.0.to_string() == *name)
+        .ok_or_else(|| format!("no script block named {name:?}"))?;
+    let script_id = found.id;
+    let script = match &found.kind {
+        creabim_core::ElementKind::ScriptObject(s) => s.clone(),
+        _ => return Err(format!("{name:?} is not a script block")),
+    };
+    let decls = script
+        .declared()
+        .map_err(|e| format!("{}: {e}", found.name))?;
+    let home = creabim_script::ensure_provisioned().map_err(|e| e.to_string())?;
+    creabim_script::ensure_packages(&["numpy"]).map_err(|e| e.to_string())?;
+    let engine = creabim_script::CPythonEngine::new(home);
+    let inputs = creabim_script::resolve(&model, &decls, &script.inputs, &params)
+        .map_err(|e| e.to_string())?;
+    let label = format!("script {}", found.name);
+    let (tx, _) = creabim_script::run_to_transaction(
+        &engine,
+        &model,
+        script_id,
+        &script,
+        &inputs,
+        &label,
+    )
+    .map_err(|e| e.to_string())?;
+    let (mut added, mut replaced, mut removed) = (0, 0, 0);
+    for op in &tx.ops {
+        match op {
+            creabim_core::Op::Insert(_) => added += 1,
+            creabim_core::Op::Replace { .. } => replaced += 1,
+            creabim_core::Op::Remove(_) => removed += 1,
+        }
+    }
+    let mut doc = Document::from_model(model);
+    doc.commit(tx).map_err(|e| e.to_string())?;
+    if is_json(&out) {
+        std::fs::write(&out, doc.model().to_json()).map_err(|e| format!("{out}: {e}"))
+    } else {
+        creabim_store::save(&out, &doc).map_err(|e| format!("{out}: {e}"))
+    }?;
+    println!("{label}: {added} added, {replaced} replaced, {removed} removed");
+    Ok(())
 }
 
 /// Turn the room labels written as notes into rooms, and save the result.

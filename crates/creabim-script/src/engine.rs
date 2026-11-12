@@ -8,7 +8,7 @@
 use pyo3::prelude::*;
 use pyo3::PyErr;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Once, OnceLock};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -17,11 +17,16 @@ pub enum ScriptError {
     Provision(#[from] creabim_provision::ProvisionError),
     #[error("interpreter was already initialized with a different home")]
     AlreadyInitialized,
+    #[error("script op failed: {0}")]
+    Op(String),
+    #[error("unsupported engine: {0}")]
+    UnsupportedEngine(String),
     #[error("python error: {0}")]
     Python(String),
 }
 
 static HOME: OnceLock<String> = OnceLock::new();
+static INIT: Once = Once::new();
 
 /// Boot the bundled interpreter; returns `sys.version`.
 ///
@@ -31,11 +36,8 @@ static HOME: OnceLock<String> = OnceLock::new();
 /// `sys.path` entry below can resolve imports.
 pub fn ensure_initialized(home: &Path) -> Result<String, ScriptError> {
     let home_str = home.to_string_lossy().into_owned();
-    if let Some(first) = HOME.get() {
-        if *first != home_str {
-            return Err(ScriptError::AlreadyInitialized);
-        }
-    } else {
+    // Thread-safe: exactly one thread initializes, however many race it.
+    INIT.call_once(|| {
         // Process-wide by design: the interpreter reads these once,
         // before first initialization.
         std::env::set_var("PYTHONHOME", &home_str);
@@ -43,6 +45,12 @@ pub fn ensure_initialized(home: &Path) -> Result<String, ScriptError> {
         crate::host::register();
         Python::initialize();
         let _ = HOME.set(home_str);
+    });
+    if HOME
+        .get()
+        .is_some_and(|first| *first != home.to_string_lossy())
+    {
+        return Err(ScriptError::AlreadyInitialized);
     }
     let site = creabim_provision::site_dir_for(home);
     Python::attach(|py| {

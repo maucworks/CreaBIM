@@ -1,10 +1,8 @@
 //! Scripting engine host: embedded CPython for CreaBIM script blocks.
 //!
-//! M-S0 spike: provision a pinned python-build-standalone distribution
-//! and boot the interpreter in-process. The host API (model reads,
-//! geometry builders, ops vocabulary) and the `ScriptEngine` trait
-//! come next; this crate only proves interpreter provisioning and
-//! linkage.
+//! M-S1: [`ScriptEngine`] runs a script object against a model
+//! snapshot; [`run_to_transaction`] maps keyed outputs onto one undoable
+//! transaction. Native op vocabulary only (walls, meshes).
 //!
 //! Build-time setup is two steps (PyO3 links the interpreter it is
 //! told about, so the bundle must exist first):
@@ -19,8 +17,11 @@
 
 pub mod engine;
 mod host;
+pub mod run;
 
 pub use creabim_provision::{
-    ensure as ensure_provisioned, ensure_packages, ProvisionError, PINNED_PYTHON, PINNED_TAG,
+    ensure as ensure_provisioned, ensure_packages, home_under, site_dir_for, ProvisionError,
+    PINNED_PYTHON, PINNED_TAG,
 };
 pub use engine::{ensure_initialized, ScriptError};
+pub use run::{resolve, run_to_transaction, CPythonEngine, ResolvedInputs, ScriptEngine};

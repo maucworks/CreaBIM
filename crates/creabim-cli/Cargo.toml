@@ -12,6 +12,7 @@ creabim-geom.workspace = true
 creabim-ifc.workspace = true
 creabim-store.workspace = true
 creabim-exchange.workspace = true
+creabim-script.workspace = true
 creabim-spec.workspace = true
 glam.workspace = true
 

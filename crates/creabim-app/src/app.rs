@@ -9649,6 +9649,17 @@ impl CreaBimApp {
                         self.project_open = true;
                     }
                 }
+                ElementKind::ScriptObject(s) => {
+                    ui.label(format!("Engine: {}", s.engine));
+                    ui.label(format!(
+                        "{} input{}, {} output{}",
+                        s.inputs.len(),
+                        if s.inputs.len() == 1 { "" } else { "s" },
+                        s.outputs.len(),
+                        if s.outputs.len() == 1 { "" } else { "s" },
+                    ));
+                    ui.label("Scripts run from the command line for now.");
+                }
                 ElementKind::Reference(r) => {
                     if let Some(l) = self.reference_fields(ui, id, r) {
                         label = l;
@@ -11695,6 +11706,7 @@ pub(crate) fn kind_word(k: &ElementKind) -> &'static str {
         ElementKind::Part(_) => "part",
         ElementKind::Site(s) if s.is_plant() => "plant",
         ElementKind::Site(_) => "site element",
+        ElementKind::ScriptObject(_) => "script",
     }
 }
 

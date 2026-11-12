@@ -502,6 +502,7 @@ fn build_scene_unjoined(
             | ElementKind::Room(_)
             | ElementKind::RoomSeparator(_)
             | ElementKind::Join(_)
+            | ElementKind::ScriptObject(_)
             | ElementKind::Detail(_) => continue,
             ElementKind::Column(_)
             | ElementKind::Beam(_)

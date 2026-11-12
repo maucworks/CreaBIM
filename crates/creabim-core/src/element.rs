@@ -139,6 +139,15 @@ impl Element {
             ElementKind::Cut(c) => vec![c.target, c.cutter],
             ElementKind::Join(j) => vec![j.a, j.b],
             ElementKind::Detail(d) => vec![d.view],
+            // a script block references whatever its element inputs name
+            ElementKind::ScriptObject(s) => s
+                .inputs
+                .iter()
+                .filter_map(|i| match &i.value {
+                    crate::script::ParamValue::Element(id) => Some(*id),
+                    _ => None,
+                })
+                .collect(),
             ElementKind::Guide(g) => g.level.into_iter().collect(),
             ElementKind::Railing(r) => std::iter::once(r.level)
                 .chain(r.stair.map(|s| s.stair))
@@ -171,6 +180,7 @@ impl Element {
             ElementKind::Material(_) => "IfcMaterial",
             ElementKind::Assembly(_) => "IfcMaterialLayerSet",
             ElementKind::Dimension(_) => "Dimension",
+            ElementKind::ScriptObject(_) => "Script",
             ElementKind::Tag(_) => "Tag",
             ElementKind::Note(_) => "Note",
             ElementKind::TextStyle(_) => "TextStyle",
@@ -389,6 +399,7 @@ impl Element {
                 }
             }
             ElementKind::Detail(d) => d.validate(),
+            ElementKind::ScriptObject(s) => s.validate(),
             ElementKind::Cut(c) => {
                 if c.target == c.cutter {
                     Err("an element can't cut itself".into())
@@ -484,6 +495,9 @@ pub enum ElementKind {
     Join(crate::joins::JoinRule),
     /// A detail component drawn in one view: a flashing, a membrane...
     Detail(crate::detail::DetailItem),
+    /// A script block: source plus engine, inputs and outputs. The block
+    /// itself draws nothing; its outputs are ordinary elements.
+    ScriptObject(crate::script::ScriptObject),
 }
 
 impl ElementKind {
@@ -501,6 +515,7 @@ impl ElementKind {
             ElementKind::Viewport(_) => "Viewport",
             ElementKind::Material(_) => "Material",
             ElementKind::Dimension(_) => "Dimension",
+            ElementKind::ScriptObject(_) => "Script",
             ElementKind::Tag(_) => "Tag",
             ElementKind::Sketch(_) => "Sketch",
             ElementKind::Cut(_) => "Cut",
