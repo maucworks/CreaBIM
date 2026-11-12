@@ -21,6 +21,8 @@ pub enum ProvisionError {
     Download(String),
     #[error("checksum failure: {0}")]
     Checksum(String),
+    #[error("pip failed: {0}")]
+    Pip(String),
     #[error("io: {0}")]
     Io(String),
 }
@@ -126,4 +128,53 @@ pub fn ensure_to(home: &Path) -> Result<PathBuf, ProvisionError> {
 /// Download to the default cache dir (or its override).
 pub fn ensure() -> Result<PathBuf, ProvisionError> {
     ensure_to(&cache_dir())
+}
+
+/// Interpreter executable inside a provisioned home.
+pub fn python_exe_for(home: &Path) -> PathBuf {
+    if cfg!(windows) {
+        home.join("python.exe")
+    } else {
+        // `python3.13`, not the full `3.13.18`: the bundle's bin link.
+        home.join("bin").join("python3.13")
+    }
+}
+
+/// App-managed site-packages next to the bundle: the pip target and
+/// the `sys.path` entry the engine adds at boot.
+pub fn site_dir_for(home: &Path) -> PathBuf {
+    home.parent().map_or_else(
+        || home.join("site-packages"),
+        |root| root.join("site-packages"),
+    )
+}
+
+/// Pip-install packages into the site dir (cached by marker).
+pub fn ensure_packages(packages: &[&str]) -> Result<PathBuf, ProvisionError> {
+    let home = ensure()?;
+    let site = site_dir_for(&home);
+    let marker = site.join(format!(".packages-{}", packages.join("-")));
+    if marker.is_file() {
+        return Ok(site);
+    }
+    std::fs::create_dir_all(&site).map_err(|e| ProvisionError::Io(format!("{site:?}: {e}")))?;
+    let status = std::process::Command::new(python_exe_for(&home))
+        .arg("-m")
+        .arg("pip")
+        .arg("install")
+        .arg("--target")
+        .arg(&site)
+        .arg("--quiet")
+        .args(packages)
+        .status()
+        .map_err(|e| ProvisionError::Pip(format!("could not run pip: {e}")))?;
+    if !status.success() {
+        return Err(ProvisionError::Pip(format!(
+            "pip install {} failed: {status}",
+            packages.join(" ")
+        )));
+    }
+    std::fs::write(&marker, packages.join("\n"))
+        .map_err(|e| ProvisionError::Io(format!("{marker:?}: {e}")))?;
+    Ok(site)
 }

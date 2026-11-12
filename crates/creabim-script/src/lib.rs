@@ -18,8 +18,9 @@
 //! so the loader finds the bundled libpython.
 
 pub mod engine;
+mod host;
 
 pub use creabim_provision::{
-    ensure as ensure_provisioned, ProvisionError, PINNED_PYTHON, PINNED_TAG,
+    ensure as ensure_provisioned, ensure_packages, ProvisionError, PINNED_PYTHON, PINNED_TAG,
 };
 pub use engine::{ensure_initialized, ScriptError};

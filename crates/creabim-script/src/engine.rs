@@ -24,6 +24,11 @@ pub enum ScriptError {
 static HOME: OnceLock<String> = OnceLock::new();
 
 /// Boot the bundled interpreter; returns `sys.version`.
+///
+/// Order per call: provision the bundle, install packages, then
+/// initialize. Registration must precede initialization (it panics
+/// once running), and the site dir must exist before boot so the
+/// `sys.path` entry below can resolve imports.
 pub fn ensure_initialized(home: &Path) -> Result<String, ScriptError> {
     let home_str = home.to_string_lossy().into_owned();
     if let Some(first) = HOME.get() {
@@ -32,14 +37,23 @@ pub fn ensure_initialized(home: &Path) -> Result<String, ScriptError> {
         }
     } else {
         // Process-wide by design: the interpreter reads these once,
-        // before first initialization (which happens on first attach
-        // below, via the `auto-initialize` feature).
+        // before first initialization.
         std::env::set_var("PYTHONHOME", &home_str);
         std::env::set_var("PYTHONNOUSERSITE", "1");
+        crate::host::register();
         Python::initialize();
         let _ = HOME.set(home_str);
     }
+    let site = creabim_provision::site_dir_for(home);
     Python::attach(|py| {
+        // Idempotent: `s not in sys.path` guards repeat calls.
+        let code = std::ffi::CString::new(format!(
+            "import sys; s = r'{}'; s not in sys.path and sys.path.append(s)",
+            site.display()
+        ))
+        .map_err(|e| ScriptError::Python(e.to_string()))?;
+        py.run(&code, None, None)
+            .map_err(|e| ScriptError::Python(e.to_string()))?;
         let version: String = py
             .import("sys")
             .and_then(|sys| sys.getattr("version"))

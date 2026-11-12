@@ -10,6 +10,8 @@ rust-version.workspace = true
 creabim-provision.workspace = true
 
 [dependencies]
+creabim-core.workspace = true
 creabim-provision.workspace = true
-pyo3 = "0.30"
+glam.workspace = true
+pyo3 = { version = "0.30", default-features = false, features = ["macros"] }
 thiserror.workspace = true
