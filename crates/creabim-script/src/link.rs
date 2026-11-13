@@ -318,8 +318,12 @@ mod tests {
                 std::fs::Permissions::from_mode(0o000),
             )
             .unwrap();
+            assert!(refresh(&locked, Some(&lr), &dir).is_err());
         }
-        assert!(refresh(&locked, Some(&lr), &dir).is_err());
+        // Windows ACLs ignore unix mode bits: the file stays readable,
+        // so refresh succeeds and the copies agree.
+        #[cfg(not(unix))]
+        assert_eq!(refresh(&locked, Some(&lr), &dir).unwrap(), None);
     }
 
     #[test]
