@@ -591,6 +591,29 @@ impl WallEnds {
         if out.len() > 1 && out[0].distance(out[out.len() - 1]) < 1e-9 {
             out.pop();
         }
+        // On a curved wall the (u, w) outline is mapped round the arc
+        // by place(); long edges need intermediate vertices or the arc
+        // comes out faceted to its corners. Caps (Δu ≈ 0) are radial
+        // segments and stay as they are. Straight walls skip this.
+        if wall.is_arc() {
+            let step = match wall.curve() {
+                crate::sketch::Curve::Arc { radius, .. } => radius * crate::sketch::ARC_STEP,
+                _ => f64::INFINITY,
+            };
+            let mut dense = Vec::with_capacity(out.len() * 2);
+            for w in out.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                dense.push(a);
+                let n = ((b.x - a.x).abs() / step).floor() as usize;
+                for i in 1..=n {
+                    dense.push(a.lerp(b, i as f64 / (n + 1) as f64));
+                }
+            }
+            if let Some(&last) = out.last() {
+                dense.push(last);
+            }
+            out = dense;
+        }
         out
     }
 }

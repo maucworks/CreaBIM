@@ -695,8 +695,8 @@ impl Snapper {
             }
         }
         for g in (0..n).filter(|i| guide(&self.segments[*i])) {
-            for j in 0..n {
-                if j != g && (!guide(&self.segments[j]) || j > g) {
+            for (j, seg) in self.segments.iter().enumerate().take(n) {
+                if j != g && (!guide(seg) || j > g) {
                     pairs.push((g.min(j), g.max(j)));
                 }
             }
@@ -1465,7 +1465,7 @@ struct EdgeMemo {
 
 fn fingerprint(mesh: &creabim_geom::mesh::TriMesh) -> u64 {
     use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut h = creabim_core::hash::StableHasher::new();
     mesh.indices.hash(&mut h);
     for p in &mesh.positions {
         for c in p {

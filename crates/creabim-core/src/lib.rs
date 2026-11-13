@@ -21,6 +21,7 @@ pub mod footing;
 pub mod garden;
 pub mod graphics;
 pub mod grids;
+pub mod hash;
 pub mod holds;
 pub mod id;
 pub mod joins;
@@ -45,6 +46,7 @@ pub mod regions;
 pub mod room;
 pub mod sample;
 pub mod screen;
+pub mod script;
 pub mod site;
 pub mod sketch;
 pub mod slab;
@@ -96,6 +98,11 @@ pub use project::{set_project, ProjectInfo};
 pub use reference::{RefSource, Reference};
 pub use room::{Ceiling, Room, RoomField, Separator};
 pub use screen::ScreenPattern;
+pub use script::{
+    drop_link_tx, entrance_path, manager_of, parse_front_matter, reconcile, registry_of,
+    remap_fresh_ids, set_link_tx, slug, ParamDecl, ParamInput, ParamKind, ParamValue, ScriptLink,
+    ScriptObject, ScriptOutput, ScriptRegistry,
+};
 pub use site::{PlantForm, Site, SiteForm};
 pub use sketch::{bulge_through, Circle, Curve, SegmentKind};
 pub use slab::{room_outline, slab_from_sketch, Shaft};
@@ -121,4 +128,6 @@ pub enum ModelError {
     StillReferenced { element: ElementId, by: ElementId },
     #[error("invalid element {0}: {1}")]
     Invalid(ElementId, String),
+    #[error("element {element} is managed by script {script:?}: change the script or its inputs, not the element")]
+    ManagedByScript { element: ElementId, script: String },
 }

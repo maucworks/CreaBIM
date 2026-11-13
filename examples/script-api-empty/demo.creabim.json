@@ -1,0 +1,408 @@
+{
+  "elements": {
+    "093fe1f2-2ff8-4be0-9b26-ef09163c14d0": {
+      "id": "093fe1f2-2ff8-4be0-9b26-ef09163c14d0",
+      "name": "Units",
+      "kind": {
+        "Units": {
+          "length": "Millimetres",
+          "precision": 0
+        }
+      }
+    },
+    "f85e6787-2182-46dc-93ae-fe33ea5e8c60": {
+      "id": "f85e6787-2182-46dc-93ae-fe33ea5e8c60",
+      "name": "Ground Floor",
+      "kind": {
+        "Level": {
+          "elevation": 0.0,
+          "height": 2.7
+        }
+      }
+    },
+    "301b50a4-622e-4bd0-a906-40498484af23": {
+      "id": "301b50a4-622e-4bd0-a906-40498484af23",
+      "name": "Cabin",
+      "kind": {
+        "ScriptObject": {
+          "source": "\"\"\"A whole cabin from an empty project: walls sampled from a\ngeometrykit Path footprint — straight runs as straight walls, fillet\narcs as arc walls — plus a door, two windows, a vent hole and a mesh\npyramid roof.\n\"\"\"\n\nimport warnings\n\nwarnings.filterwarnings(\"ignore\", category=DeprecationWarning)\n\nfrom geometrykit import Arc, Path, Vec\n\nfrom creabim import arc_wall, door, mesh, opening, wall, window\n\nLVL = \"Ground Floor\"\n\nfootprint = Path.from_pts(\n    [Vec(0, 0, 0), Vec(6, 0, 0), Vec(6, 4, 0), Vec(0, 4, 0)], closed=True\n)\nfootprint.fillet([0, 1, 2, 3], 0.5)\n\n# Straight runs stay straight walls; fillet arcs become arc walls with\n# the same sweep — no segmentation. Filleting puts the arcs at the\n# even indices, so the odd indices run south, east, north, west.\nruns = []\nfor i, seg in enumerate(footprint.segments):\n    p0 = [seg.start.x, seg.start.y]\n    p1 = [seg.end.x, seg.end.y]\n    if isinstance(seg, Arc):\n        runs.append(\n            arc_wall(\n                f\"c-wall-{i}\",\n                LVL,\n                [seg.center.x, seg.center.y],\n                p0,\n                seg.angle,\n                thickness=0.2,\n                name=f\"Cabin wall-{i}\",\n            )\n        )\n    else:\n        runs.append(\n            wall(\n                f\"c-wall-{i}\",\n                LVL,\n                p0,\n                p1,\n                thickness=0.2,\n                name=f\"Cabin wall-{i}\",\n            )\n        )\n\nOUTPUTS = runs + [\n    # Hosts are same-run wall keys; arcs host too (offset runs round them).\n    door(\"c-door\", \"c-wall-1\", offset=1.0, mark=\"D-C1\"),\n    window(\"c-win-e\", \"c-wall-3\", offset=1.0, mark=\"W-C1\"),\n    window(\"c-win-w\", \"c-wall-7\", offset=1.0, mark=\"W-C2\"),\n    opening(\"c-vent\", \"c-wall-5\", width=0.5, height=0.5, sill=1.9),\n    # Pyramid roof: one mesh, five vertices, four faces.\n    mesh(\n        \"c-roof\",\n        verts=[\n            [-0.3, -0.3, 2.7],\n            [6.3, -0.3, 2.7],\n            [6.3, 4.3, 2.7],\n            [-0.3, 4.3, 2.7],\n            [3.0, 2.0, 4.2],\n        ],\n        faces=[[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]],\n        name=\"Cabin roof\",\n    ),\n]\n",
+          "engine": "cpython",
+          "inputs": [],
+          "outputs": [
+            {
+              "key": "c-wall-0",
+              "id": "ed1f1fae-3ed5-4472-89ae-d549c20b166b"
+            },
+            {
+              "key": "c-wall-1",
+              "id": "83479d10-bf75-40d5-b74e-8d44df9630da"
+            },
+            {
+              "key": "c-wall-2",
+              "id": "73bbea13-c2e1-4179-958d-906380938258"
+            },
+            {
+              "key": "c-wall-3",
+              "id": "478dae1b-4195-4044-9098-bf6131c0972e"
+            },
+            {
+              "key": "c-wall-4",
+              "id": "c3874f32-bb1d-4b5d-a363-02e72eac7601"
+            },
+            {
+              "key": "c-wall-5",
+              "id": "38899d1e-6cf3-4add-86e6-ae0ebe39f2ce"
+            },
+            {
+              "key": "c-wall-6",
+              "id": "6359cedd-134f-4f94-8eae-94b17a0b6163"
+            },
+            {
+              "key": "c-wall-7",
+              "id": "86e5bf49-fe79-42d4-b78f-26cd3a7af3a6"
+            },
+            {
+              "key": "c-roof",
+              "id": "e9baf05e-5121-4753-bde9-82cf50077118"
+            },
+            {
+              "key": "c-door",
+              "id": "647a78e4-8f68-4c5c-a40c-4564fe88aa54"
+            },
+            {
+              "key": "c-win-e",
+              "id": "4bc92a61-a692-40ed-a734-d7a85d8c67d9"
+            },
+            {
+              "key": "c-win-w",
+              "id": "e1558788-b093-4c76-bbc8-5be93e1ae233"
+            },
+            {
+              "key": "c-vent",
+              "id": "5bd2dc75-8888-4937-827c-3f8303b196fa"
+            }
+          ],
+          "requirements": [
+            "geometrykit"
+          ],
+          "link": "Cabin"
+        }
+      }
+    },
+    "950ca5b4-f56c-4b3a-8a4b-0b34bf9978a5": {
+      "id": "950ca5b4-f56c-4b3a-8a4b-0b34bf9978a5",
+      "name": "Script registry",
+      "kind": {
+        "ScriptRegistry": {
+          "links": [
+            {
+              "name": "Cabin",
+              "path": "scripts/cabin.py"
+            }
+          ]
+        }
+      }
+    },
+    "ed1f1fae-3ed5-4472-89ae-d549c20b166b": {
+      "id": "ed1f1fae-3ed5-4472-89ae-d549c20b166b",
+      "name": "Cabin wall-0",
+      "kind": {
+        "Wall": {
+          "level": "f85e6787-2182-46dc-93ae-fe33ea5e8c60",
+          "start": [
+            0.0,
+            0.5000000000000001
+          ],
+          "end": [
+            0.5000000000000001,
+            -4.250565120907878e-32
+          ],
+          "thickness": 0.2,
+          "height": 2.7,
+          "base_offset": 0.0,
+          "material": null,
+          "bulge": 0.41421356237309515
+        }
+      }
+    },
+    "83479d10-bf75-40d5-b74e-8d44df9630da": {
+      "id": "83479d10-bf75-40d5-b74e-8d44df9630da",
+      "name": "Cabin wall-1",
+      "kind": {
+        "Wall": {
+          "level": "f85e6787-2182-46dc-93ae-fe33ea5e8c60",
+          "start": [
+            0.5000000000000001,
+            0.0
+          ],
+          "end": [
+            5.5,
+            0.0
+          ],
+          "thickness": 0.2,
+          "height": 2.7,
+          "base_offset": 0.0,
+          "material": null
+        }
+      }
+    },
+    "73bbea13-c2e1-4179-958d-906380938258": {
+      "id": "73bbea13-c2e1-4179-958d-906380938258",
+      "name": "Cabin wall-2",
+      "kind": {
+        "Wall": {
+          "level": "f85e6787-2182-46dc-93ae-fe33ea5e8c60",
+          "start": [
+            5.5,
+            0.0
+          ],
+          "end": [
+            6.0,
+            0.5000000000000001
+          ],
+          "thickness": 0.2,
+          "height": 2.7,
+          "base_offset": 0.0,
+          "material": null,
+          "bulge": 0.41421356237309515
+        }
+      }
+    },
+    "478dae1b-4195-4044-9098-bf6131c0972e": {
+      "id": "478dae1b-4195-4044-9098-bf6131c0972e",
+      "name": "Cabin wall-3",
+      "kind": {
+        "Wall": {
+          "level": "f85e6787-2182-46dc-93ae-fe33ea5e8c60",
+          "start": [
+            6.0,
+            0.5000000000000001
+          ],
+          "end": [
+            6.0,
+            3.5
+          ],
+          "thickness": 0.2,
+          "height": 2.7,
+          "base_offset": 0.0,
+          "material": null
+        }
+      }
+    },
+    "c3874f32-bb1d-4b5d-a363-02e72eac7601": {
+      "id": "c3874f32-bb1d-4b5d-a363-02e72eac7601",
+      "name": "Cabin wall-4",
+      "kind": {
+        "Wall": {
+          "level": "f85e6787-2182-46dc-93ae-fe33ea5e8c60",
+          "start": [
+            6.0,
+            3.5
+          ],
+          "end": [
+            5.5,
+            4.0
+          ],
+          "thickness": 0.2,
+          "height": 2.7,
+          "base_offset": 0.0,
+          "material": null,
+          "bulge": 0.4142135623730951
+        }
+      }
+    },
+    "38899d1e-6cf3-4add-86e6-ae0ebe39f2ce": {
+      "id": "38899d1e-6cf3-4add-86e6-ae0ebe39f2ce",
+      "name": "Cabin wall-5",
+      "kind": {
+        "Wall": {
+          "level": "f85e6787-2182-46dc-93ae-fe33ea5e8c60",
+          "start": [
+            5.5,
+            4.0
+          ],
+          "end": [
+            0.5000000000000001,
+            4.0
+          ],
+          "thickness": 0.2,
+          "height": 2.7,
+          "base_offset": 0.0,
+          "material": null
+        }
+      }
+    },
+    "6359cedd-134f-4f94-8eae-94b17a0b6163": {
+      "id": "6359cedd-134f-4f94-8eae-94b17a0b6163",
+      "name": "Cabin wall-6",
+      "kind": {
+        "Wall": {
+          "level": "f85e6787-2182-46dc-93ae-fe33ea5e8c60",
+          "start": [
+            0.5000000000000001,
+            4.0
+          ],
+          "end": [
+            0.0,
+            3.5
+          ],
+          "thickness": 0.2,
+          "height": 2.7,
+          "base_offset": 0.0,
+          "material": null,
+          "bulge": 0.41421356237309515
+        }
+      }
+    },
+    "86e5bf49-fe79-42d4-b78f-26cd3a7af3a6": {
+      "id": "86e5bf49-fe79-42d4-b78f-26cd3a7af3a6",
+      "name": "Cabin wall-7",
+      "kind": {
+        "Wall": {
+          "level": "f85e6787-2182-46dc-93ae-fe33ea5e8c60",
+          "start": [
+            0.0,
+            3.5
+          ],
+          "end": [
+            0.0,
+            0.5000000000000001
+          ],
+          "thickness": 0.2,
+          "height": 2.7,
+          "base_offset": 0.0,
+          "material": null
+        }
+      }
+    },
+    "e9baf05e-5121-4753-bde9-82cf50077118": {
+      "id": "e9baf05e-5121-4753-bde9-82cf50077118",
+      "name": "Cabin roof",
+      "kind": {
+        "FreeMesh": {
+          "level": null,
+          "origin": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mesh": {
+            "vertices": [
+              [
+                -0.3,
+                -0.3,
+                2.7
+              ],
+              [
+                6.3,
+                -0.3,
+                2.7
+              ],
+              [
+                6.3,
+                4.3,
+                2.7
+              ],
+              [
+                -0.3,
+                4.3,
+                2.7
+              ],
+              [
+                3.0,
+                2.0,
+                4.2
+              ]
+            ],
+            "faces": [
+              [
+                0,
+                1,
+                4
+              ],
+              [
+                1,
+                2,
+                4
+              ],
+              [
+                2,
+                3,
+                4
+              ],
+              [
+                3,
+                0,
+                4
+              ]
+            ]
+          },
+          "ifc_class": "IfcBuildingElementProxy",
+          "material": null,
+          "modifiers": [],
+          "rotation": 0.0,
+          "scale": 1.0
+        }
+      }
+    },
+    "647a78e4-8f68-4c5c-a40c-4564fe88aa54": {
+      "id": "647a78e4-8f68-4c5c-a40c-4564fe88aa54",
+      "name": "door c-door",
+      "kind": {
+        "Opening": {
+          "host": "83479d10-bf75-40d5-b74e-8d44df9630da",
+          "kind": "Door",
+          "offset": 1.0,
+          "sill": 0.0,
+          "width": 0.9,
+          "height": 2.1
+        }
+      },
+      "mark": "D-C1"
+    },
+    "4bc92a61-a692-40ed-a734-d7a85d8c67d9": {
+      "id": "4bc92a61-a692-40ed-a734-d7a85d8c67d9",
+      "name": "window c-win-e",
+      "kind": {
+        "Opening": {
+          "host": "478dae1b-4195-4044-9098-bf6131c0972e",
+          "kind": "Window",
+          "offset": 1.0,
+          "sill": 0.9,
+          "width": 1.2,
+          "height": 1.3
+        }
+      },
+      "mark": "W-C1"
+    },
+    "e1558788-b093-4c76-bbc8-5be93e1ae233": {
+      "id": "e1558788-b093-4c76-bbc8-5be93e1ae233",
+      "name": "window c-win-w",
+      "kind": {
+        "Opening": {
+          "host": "86e5bf49-fe79-42d4-b78f-26cd3a7af3a6",
+          "kind": "Window",
+          "offset": 1.0,
+          "sill": 0.9,
+          "width": 1.2,
+          "height": 1.3
+        }
+      },
+      "mark": "W-C2"
+    },
+    "5bd2dc75-8888-4937-827c-3f8303b196fa": {
+      "id": "5bd2dc75-8888-4937-827c-3f8303b196fa",
+      "name": "opening c-vent",
+      "kind": {
+        "Opening": {
+          "host": "38899d1e-6cf3-4add-86e6-ae0ebe39f2ce",
+          "kind": "Hole",
+          "offset": 0.0,
+          "sill": 1.9,
+          "width": 0.5,
+          "height": 0.5
+        }
+      }
+    }
+  }
+}

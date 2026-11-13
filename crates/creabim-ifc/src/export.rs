@@ -516,9 +516,16 @@ pub fn export_ifc4(model: &Model, opts: &ExportOptions) -> String {
                 });
                 let mut solids = vec![];
                 for local in ends.local_outlines(wall, core) {
+                    // Through the wall's own mapping, not raw (u, w): on
+                    // a curved wall u runs round the arc and the
+                    // footprint must bend with it. For straight walls
+                    // this is exactly (u, w - loc) as before.
                     let mut pts: Vec<Ref> = local
                         .iter()
-                        .map(|p| c.w.add("IFCCARTESIANPOINT", point2(p.x, p.y - loc)))
+                        .map(|p| {
+                            let q = wall.place(p.x, p.y) - origin;
+                            c.w.add("IFCCARTESIANPOINT", point2(q.dot(d), q.dot(n)))
+                        })
                         .collect();
                     pts.push(pts[0]);
                     let poly = c.w.add("IFCPOLYLINE", list(&pts));

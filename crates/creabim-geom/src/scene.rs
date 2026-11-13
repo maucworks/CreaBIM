@@ -502,6 +502,8 @@ fn build_scene_unjoined(
             | ElementKind::Room(_)
             | ElementKind::RoomSeparator(_)
             | ElementKind::Join(_)
+            | ElementKind::ScriptObject(_)
+            | ElementKind::ScriptRegistry(_)
             | ElementKind::Detail(_) => continue,
             ElementKind::Column(_)
             | ElementKind::Beam(_)
@@ -711,7 +713,16 @@ fn apply_joins(model: &Model, items: &mut [SceneItem]) {
     };
     let boxes: Vec<Option<(glam::Vec3, glam::Vec3)>> = items
         .iter()
-        .map(|i| if i.ghost { None } else { i.mesh.bounds() })
+        .map(|i| {
+            // an opening's lining stands in its host wall's reveal, flush
+            // with its faces: joined, the coplanar boxes breed slivers
+            // (and a slab never reaches inside an opening)
+            if i.ghost || i.is_lining() {
+                None
+            } else {
+                i.mesh.bounds()
+            }
+        })
         .collect();
     let overlap = |a: (glam::Vec3, glam::Vec3), b: (glam::Vec3, glam::Vec3)| {
         let lo = a.0.max(b.0);
@@ -783,10 +794,11 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
-/// A fingerprint of a mesh's shape.
+/// A fingerprint of a mesh's shape (stable across calls, unlike
+/// [`std::collections::hash_map::DefaultHasher`]).
 fn mesh_key(m: &TriMesh) -> u64 {
     use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut h = creabim_core::hash::StableHasher::new();
     m.indices.hash(&mut h);
     for p in &m.positions {
         for v in p {
@@ -811,14 +823,48 @@ pub fn boolean_mesh(a: &TriMesh, b: &TriMesh, op: BoolOp) -> TriMesh {
             .collect()
     };
     let result = csg::boolean(polys(a), polys(b), op);
+    // A boolean of closed architectural solids never has many more
+    // pieces than its inputs; a result far beyond that is the BSP
+    // breeding slivers off grazing splits, which grows without end (a
+    // wall brushing a slab reached 5.1M triangles and hung the 3D
+    // view). The un-cut solid stands instead: the two overlap as they
+    // are, and nothing hangs.
+    let cap = (a.indices.len() + b.indices.len()) / 3 * 2 + 512;
+    if result.len() > cap {
+        eprintln!(
+            "[diag] boolean {} grew to {} polys ({}+{} tris in): kept the un-cut solid",
+            op.label(),
+            result.len(),
+            a.indices.len() / 3,
+            b.indices.len() / 3,
+        );
+        return a.clone();
+    }
     let mut out = TriMesh::default();
     for p in &result {
-        let n = (p.points[1] - p.points[0])
-            .cross(p.points[2] - p.points[0])
-            .normalize_or_zero();
-        let fan: Vec<[usize; 3]> = (1..p.points.len() - 1).map(|i| [0, i, i + 1]).collect();
-        // the fan's winding already follows the polygon's
-        out.add_polygon(&p.points, &fan, newell(&p.points).normalize_or(n));
+        let n = newell(&p.points).normalize_or_zero();
+        // triangulate the piece by ear clipping, not by fan: a fan of a
+        // concave piece overlaps itself, and the next boolean reads the
+        // doubled surface as solid-in-solid and breeds copies of it (a
+        // wall notch grew five million triangles that way). The piece is
+        // projected on its own plane, along the axis it is LEAST aligned
+        // with, so the in-plane basis never runs flat.
+        let axis = if n.x.abs() < n.y.abs().min(n.z.abs()) {
+            DVec3::X
+        } else if n.y.abs() < n.z.abs() {
+            DVec3::Y
+        } else {
+            DVec3::Z
+        };
+        let u = axis.cross(n).normalize_or_zero();
+        let v = n.cross(u);
+        let pts2: Vec<DVec2> = p
+            .points
+            .iter()
+            .map(|&q| DVec2::new(q.dot(u), q.dot(v)))
+            .collect();
+        let fan = triangulate(&pts2);
+        out.add_polygon(&p.points, &fan, n);
     }
     out
 }

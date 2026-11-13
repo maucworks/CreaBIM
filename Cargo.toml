@@ -18,6 +18,9 @@ creabim-store = { path = "crates/creabim-store" }
 creabim-blend = { path = "crates/creabim-blend" }
 creabim-exchange = { path = "crates/creabim-exchange" }
 creabim-freecad = { path = "crates/creabim-freecad" }
+creabim-nurbs = { path = "crates/creabim-nurbs" }
+creabim-provision = { path = "crates/creabim-provision" }
+creabim-script = { path = "crates/creabim-script" }
 creabim-spec = { path = "crates/creabim-spec" }
 rusqlite = { version = "0.40", features = ["bundled"] }
 glam = { version = "0.30", features = ["serde"] }

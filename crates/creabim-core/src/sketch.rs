@@ -442,6 +442,29 @@ mod tests {
     }
 
     #[test]
+    fn bulge_is_the_tangent_of_a_quarter_sweep() {
+        use std::f64::consts::FRAC_PI_2;
+        // The arc_wall conversion rests on this: sweep s ⟺ bulge tan(s/4),
+        // counter-clockwise positive, bulging right of start → end.
+        let (a, b) = (DVec2::new(2.0, 0.0), DVec2::new(0.0, 2.0));
+        let through = DVec2::new(2.0_f64.sqrt(), 2.0_f64.sqrt());
+        let bulge = bulge_through(a, b, through);
+        assert!((bulge - (FRAC_PI_2 / 4.0).tan()).abs() < 1e-12);
+        let arc = Curve::arc(a, b, bulge);
+        assert!(arc.at(0.5).distance(through) < 1e-9);
+        assert!(arc.at(1.0).distance(b) < 1e-12);
+        // Clockwise mirrors it: same chord, negative bulge, other side.
+        let (c, d) = (DVec2::new(2.0, 0.0), DVec2::new(0.0, -2.0));
+        let under = DVec2::new(2.0_f64.sqrt(), -2.0_f64.sqrt());
+        let bulge = bulge_through(c, d, under);
+        assert!((bulge + (FRAC_PI_2 / 4.0).tan()).abs() < 1e-12);
+        let arc = Curve::arc(c, d, bulge);
+        assert!(arc.at(0.5).distance(under) < 1e-9);
+        // A quarter of the sweep back: the builder's formula inverts.
+        assert!((4.0 * bulge.atan() + FRAC_PI_2).abs() < 1e-12);
+    }
+
+    #[test]
     fn circles_and_arcs_extrude_in_pieces() {
         let plane = Workplane::ground(0.0);
         let c = Sketch::circle(None, plane, DVec2::new(1.0, 1.0), 2.0);

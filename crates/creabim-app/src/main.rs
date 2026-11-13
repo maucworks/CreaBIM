@@ -36,6 +36,8 @@ mod props;
 mod render3d;
 mod roomtool;
 mod schedulepane;
+mod scriptrun;
+mod scriptui;
 mod selection;
 mod sheetview;
 mod sketch;

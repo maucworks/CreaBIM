@@ -278,7 +278,7 @@ pub fn dxf_lines(path: &str) -> Result<Vec<Vec<DVec2>>, String> {
 
 fn path_key(path: &str) -> u64 {
     use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut h = creabim_core::hash::StableHasher::new();
     path.hash(&mut h);
     h.finish() | 1 << 63
 }

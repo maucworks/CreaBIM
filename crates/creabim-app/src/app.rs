@@ -134,6 +134,8 @@ pub struct CreaBimApp {
     drawings: HashMap<ElementId, (u64, Drawing)>,
     /// Drawings and the 3D scene being built off the UI thread.
     builds: crate::builds::Builds,
+    /// Script blocks recomputed off the UI thread.
+    scripts: crate::scriptrun::ScriptRunner,
     /// Each view's looks on sheets, with the model revision they are for.
     looks: HashMap<ElementId, (u64, std::sync::Arc<creabim_geom::looks::Looks>)>,
     /// The same for views seen in X-ray, which their sheets don't follow.
@@ -390,6 +392,7 @@ impl CreaBimApp {
             area_now: 0,
             drawings: HashMap::new(),
             builds: Default::default(),
+            scripts: Default::default(),
             looks: HashMap::new(),
             xray_drawings: HashMap::new(),
             dark_3d: true,
@@ -506,6 +509,18 @@ impl CreaBimApp {
         self.frame_all();
     }
 
+    /// Keep the script runner's project directory in step with the
+    /// project file's location: `scripts/` lives next to it (M-S6).
+    /// A bare name means an unsaved project: no scripts dir yet.
+    fn set_script_dir(&mut self) {
+        let dir = if self.path.contains('/') {
+            creabim_script::link::project_dir_of(std::path::Path::new(&self.path))
+        } else {
+            None
+        };
+        self.scripts.set_project_dir(dir);
+    }
+
     /// Open a project file, or import and link any other file.
     fn open_path(&mut self, path: &str) {
         let lower = path.to_ascii_lowercase();
@@ -541,6 +556,7 @@ impl CreaBimApp {
                     self.watch = Default::default();
                     self.recent.add(path);
                     self.path = with_extension(path, "creabim");
+                    self.set_script_dir();
                     self.status = format!(
                         "Opened {} ({}): {n} elements{}. Save keeps it as {}.",
                         file_label(path),
@@ -572,6 +588,7 @@ impl CreaBimApp {
                 self.watch = Default::default();
                 self.recent.add(path);
                 self.path = path.to_string();
+                self.set_script_dir();
                 self.saved_revision = Some(self.doc.model().revision());
                 self.status = format!("Opened {path}");
                 // copies a Duplicate left on their originals (MU24)
@@ -603,6 +620,7 @@ impl CreaBimApp {
         }
         if !self.path.to_ascii_lowercase().ends_with(".creabim") {
             self.path = with_extension(&self.path, "creabim");
+            self.set_script_dir();
         }
         let r = creabim_store::save(&self.path, &self.doc);
         if r.is_ok() {
@@ -623,6 +641,7 @@ impl CreaBimApp {
         let start = with_extension(&self.path, "creabim");
         if let Some(path) = crate::files::pick_save(&start, "Save the project as", "creabim") {
             self.path = path;
+            self.set_script_dir();
             self.save();
         }
     }
@@ -1452,7 +1471,14 @@ impl CreaBimApp {
 
     /// Fit the 3D view round the whole model.
     fn frame_3d(&mut self) {
+        // TEMP-DIAG: synchronous full-scene build on the UI thread.
+        eprintln!("[diag] 3d: frame_3d start");
+        let t = std::time::Instant::now();
         let scene = (*creabim_geom::shared_scene(self.doc.model())).clone();
+        eprintln!(
+            "[diag] 3d: frame_3d scene ready in {:.0} ms",
+            t.elapsed().as_secs_f64() * 1000.0
+        );
         let bounds = scene
             .iter()
             .filter_map(|s| s.mesh.bounds())
@@ -2314,7 +2340,17 @@ impl CreaBimApp {
         let (scene_rev, scene) = match creabim_geom::shared_scene_ready(model) {
             Some(s) => (model.revision(), s),
             None if shown.is_none() || !self.builds.enabled() => {
-                (model.revision(), creabim_geom::shared_scene(model))
+                // TEMP-DIAG for the 3D-view beachball: sync builds block
+                // the UI thread; log before/after so a hang is located.
+                let rev = model.revision();
+                eprintln!("[diag] 3d: sync scene build start (rev {rev})");
+                let t = std::time::Instant::now();
+                let s = creabim_geom::shared_scene(model);
+                eprintln!(
+                    "[diag] 3d: sync scene built in {:.0} ms",
+                    t.elapsed().as_secs_f64() * 1000.0
+                );
+                (model.revision(), s)
             }
             None => {
                 self.builds.start_scene(model);
@@ -6856,6 +6892,53 @@ impl CreaBimApp {
         );
     }
 
+    /// A script block from a starter template, opened in the panel.
+    /// Embedded (unlinked): link it to `scripts/` from the panel once
+    /// the project is saved. The runner picks it up on its own.
+    fn new_script(&mut self) {
+        let used: Vec<String> = self.doc.model().iter().map(|e| e.name.clone()).collect();
+        let name = std::iter::once("Script".to_string())
+            .chain((2..).map(|n| format!("Script {n}")))
+            .find(|n| !used.contains(n))
+            .expect("unbounded");
+        let source = "# A script block: INPUTS in, OUTPUTS out. Press Run and the\n# outputs become native elements; re-running replaces them by key.\n# in: size: float = 1.0\nfrom creabim import mesh\n\ns = INPUTS[\"size\"]\nOUTPUTS = [mesh(\"pyramid\",\n                verts=[[0, 0, 0], [s, 0, 0], [s, s, 0], [0, s, 0],\n                       [s / 2, s / 2, s]],\n                faces=[[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4],\n                       [3, 2, 1, 0]])]\n";
+        let e = Element::new(
+            name,
+            ElementKind::ScriptObject(creabim_core::ScriptObject::new(source, "cpython")),
+        );
+        let id = e.id;
+        let r = self.doc.commit(Transaction::new("New script").insert(e));
+        self.selection.only(id);
+        self.report(
+            r,
+            "New script block, open in the panel. Press Run: the pyramid commits as a mesh; link it to scripts/ to edit it in an IDE.",
+        );
+    }
+
+    /// A saved 3D (axonometric) view of the model, opened for orbiting.
+    fn new_3d_view(&mut self) {
+        let used: Vec<String> = self
+            .doc
+            .model()
+            .iter()
+            .filter(|e| matches!(e.kind, ElementKind::View(_)))
+            .map(|e| e.name.clone())
+            .collect();
+        let name = std::iter::once("3D View".to_string())
+            .chain((2..).map(|n| format!("3D View {n}")))
+            .find(|n| !used.contains(n))
+            .expect("unbounded");
+        let e = Element::new(name, ElementKind::View(View::axonometric(35.0, 30.0)));
+        let id = e.id;
+        let r = self.doc.commit(Transaction::new("New 3D view").insert(e));
+        self.active_view = Some(id);
+        self.selection.only(id);
+        self.report(
+            r,
+            "New 3D view. Drag it to orbit; place it on a sheet with Place view….",
+        );
+    }
+
     fn new_schedule(&mut self, category: ScheduleCategory) {
         let label = category.label();
         let e = Element::new(
@@ -8715,6 +8798,18 @@ impl CreaBimApp {
             }
         };
         if self.prop_header(ui, "element", section, true, None) {
+            // Script outputs are locked (the commit guard enforces it):
+            // say who manages the element and skip the editors — any
+            // edit here would be overwritten on the next run.
+            if let Some((_, script)) = creabim_core::manager_of(self.doc.model(), id) {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Managed by script {script}: direct edits are locked. Change the script or its inputs; delete the block to keep this as an ordinary element."
+                    ))
+                    .weak(),
+                );
+                return;
+            }
             match &mut edited.kind {
                 ElementKind::Level(l) => {
                     if num(ui, "Elevation", &mut l.elevation, -100.0, 1000.0) {
@@ -9647,6 +9742,34 @@ impl CreaBimApp {
                 ElementKind::Project(_) => {
                     if ui.button("Project information…").clicked() {
                         self.project_open = true;
+                    }
+                }
+                ElementKind::ScriptObject(s) => {
+                    if let Some(l) =
+                        crate::scriptui::script_panel(ui, &mut self.scripts, &mut self.doc, id, s)
+                    {
+                        label = l;
+                    }
+                }
+                ElementKind::ScriptRegistry(r) => {
+                    // The registry is managed here by removing entries
+                    // (blocks that named one fall back to embedded) and
+                    // in full with `script registry` on the CLI.
+                    let mut drop: Option<String> = None;
+                    for l in &r.links {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{} → {}", l.name, l.path));
+                            if ui.small_button("Remove").clicked() {
+                                drop = Some(l.name.clone());
+                            }
+                        });
+                    }
+                    if r.links.is_empty() {
+                        ui.label(egui::RichText::new("No disc modules registered.").weak());
+                    }
+                    if let Some(name) = drop {
+                        r.remove(&name);
+                        label = "Remove registry entry";
                     }
                 }
                 ElementKind::Reference(r) => {
@@ -10982,6 +11105,12 @@ impl eframe::App for CreaBimApp {
                 .send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.close_ask = true;
         }
+        // script blocks recompute off the UI thread; a finished run
+        // repaints so the panel and the views pick it up
+        let (scripts, doc) = (&mut self.scripts, &mut self.doc);
+        if scripts.poll(doc) {
+            ui.ctx().request_repaint();
+        }
         let ctx = ui.ctx().clone();
         crate::trace::hold(ctx.input(|i| i.pointer.any_down()));
         let m = ctx.input(|i| i.modifiers);
@@ -11695,6 +11824,8 @@ pub(crate) fn kind_word(k: &ElementKind) -> &'static str {
         ElementKind::Part(_) => "part",
         ElementKind::Site(s) if s.is_plant() => "plant",
         ElementKind::Site(_) => "site element",
+        ElementKind::ScriptObject(_) => "script",
+        ElementKind::ScriptRegistry(_) => "script registry",
     }
 }
 

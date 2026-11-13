@@ -111,6 +111,25 @@ impl Document {
     /// lines, heights tied to levels; see [`crate::walls`]), added to `tx`
     /// so it all undoes as one step.
     fn apply_settled(&mut self, tx: &mut Transaction) -> Result<(), ModelError> {
+        // Script outputs are locked: a replace would be silently
+        // destroyed on the next recompute, so it fails loudly here
+        // instead. Only the runner's own transactions (labelled
+        // `script…`) may rewrite managed elements; removes are allowed
+        // (a deleted output is re-created on the next run, or stays
+        // gone with the key). Settle extras appended below are solver
+        // consistency, not user intent, and stay exempt.
+        if !tx.label.starts_with("script") {
+            for op in &tx.ops {
+                if let crate::Op::Replace { after, .. } = op {
+                    if let Some((_, script)) = crate::script::manager_of(&self.model, after.id) {
+                        return Err(ModelError::ManagedByScript {
+                            element: after.id,
+                            script,
+                        });
+                    }
+                }
+            }
+        }
         let kept = crate::walls::lines_kept(&self.model, tx);
         tx.apply(&mut self.model)?;
         let levels = crate::walls::touches_walls(tx);

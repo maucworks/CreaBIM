@@ -496,8 +496,9 @@ pub fn evaluate(mesh: &EditMesh, stack: &[Modifier]) -> Evaluated {
     if !stack.iter().any(|m| m.enabled) {
         return evaluate_now(mesh, stack);
     }
+    use crate::hash::StableHasher;
     use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut h = StableHasher::new();
     for v in &mesh.vertices {
         v.to_array().map(f64::to_bits).hash(&mut h);
     }

@@ -5,7 +5,21 @@
 
 use glam::DVec3;
 
-const EPS: f64 = 1e-7;
+/// csg.js's tolerance, and for the same reason: scene meshes carry f32
+/// noise of about 1e-6 (a metre-scale coordinate has no finer f32), so
+/// faces that are coincident in fact — every wall top level with a slab
+/// top, every stacked layer — must still classify as coplanar. Tighter,
+/// and they graze instead: each cut then breeds two full-size copies of
+/// the face, which multiply at every further cut (a scene grew five
+/// million triangles off ten wall cuts this way).
+const EPS: f64 = 1e-5;
+
+/// Pieces thinner than this (mean width, twice the area over the
+/// perimeter) are numerical noise from grazing splits, not geometry:
+/// dropped, or they breed slivers that multiply at every further cut
+/// (a wall brushing a slab once grew a scene's booleans into millions
+/// of triangles and hung the 3D view).
+const THIN: f64 = 1e-5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BoolOp {
@@ -32,6 +46,27 @@ impl BoolOp {
 pub struct Polygon {
     pub points: Vec<DVec3>,
     plane: Plane,
+}
+
+/// Mean width of a polygon: twice its area over its perimeter (the
+/// Newell sum is twice the area). Thin by this measure whatever its
+/// length, so metre-long grazing slivers are caught too.
+pub fn thinness(points: &[DVec3]) -> f64 {
+    let mut n = DVec3::ZERO;
+    let mut per = 0.0;
+    for i in 0..points.len() {
+        let (a, b) = (points[i], points[(i + 1) % points.len()]);
+        n += DVec3::new(
+            (a.y - b.y) * (a.z + b.z),
+            (a.z - b.z) * (a.x + b.x),
+            (a.x - b.x) * (a.y + b.y),
+        );
+        per += a.distance(b);
+    }
+    if per <= 0.0 {
+        return 0.0;
+    }
+    n.length() / per
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -121,13 +156,15 @@ impl Plane {
                         b.push(v);
                     }
                 }
-                if f.len() >= 3 {
+                // a piece thinner than THIN is numerical noise: dropped,
+                // or slivers breed through every further cut
+                if f.len() >= 3 && thinness(&f) > THIN {
                     front.push(Polygon {
                         points: f,
                         plane: poly.plane,
                     });
                 }
-                if b.len() >= 3 {
+                if b.len() >= 3 && thinness(&b) > THIN {
                     back.push(Polygon {
                         points: b,
                         plane: poly.plane,
@@ -141,6 +178,11 @@ impl Plane {
 impl Polygon {
     pub fn new(points: Vec<DVec3>) -> Option<Polygon> {
         if points.len() < 3 {
+            return None;
+        }
+        // degenerate slivers poison the tree: a graze splits them without
+        // end (MU39's crash, met again as a hang)
+        if thinness(&points) <= THIN {
             return None;
         }
         let plane = Plane::from_points(&points)?;
@@ -244,7 +286,10 @@ impl Node {
             self.polygons.extend(polys);
             return;
         }
-        let plane = *self.plane.get_or_insert(polys[0].plane);
+        // a fresh node splits by the plane that cuts the set most evenly:
+        // the first polygon's plane leans the tree into a long spine, and
+        // clipping against a spine shatters cutters into slivers
+        let plane = *self.plane.get_or_insert(Self::balanced(&polys));
         let (mut front, mut back) = (Vec::new(), Vec::new());
         let (mut cf, mut cb) = (Vec::new(), Vec::new());
         for p in &polys {
@@ -262,6 +307,49 @@ impl Node {
                 .get_or_insert_with(Default::default)
                 .build_at(back, depth + 1);
         }
+    }
+
+    /// Of a few spread candidate planes, the one that cuts `polys` most
+    /// evenly: a straddling polygon feeds both sides, so it counts
+    /// against the balance too.
+    fn balanced(polys: &[Polygon]) -> Plane {
+        if polys.len() <= 8 {
+            return polys[0].plane;
+        }
+        let mut best = polys[0].plane;
+        let mut best_score = usize::MAX;
+        for k in 0..8 {
+            let plane = polys[k * (polys.len() - 1) / 7].plane;
+            let (mut f, mut b) = (0usize, 0usize);
+            for p in polys {
+                let mut kind = 0u8;
+                for pt in &p.points {
+                    let t = plane.n.dot(*pt) - plane.w;
+                    kind |= if t < -EPS {
+                        2
+                    } else if t > EPS {
+                        1
+                    } else {
+                        0
+                    };
+                }
+                match kind {
+                    1 => f += 1,
+                    2 => b += 1,
+                    3 => {
+                        f += 1;
+                        b += 1;
+                    }
+                    _ => {}
+                }
+            }
+            let score = f.abs_diff(b);
+            if score < best_score {
+                best_score = score;
+                best = plane;
+            }
+        }
+        best
     }
 }
 
@@ -333,6 +421,12 @@ pub fn to_mesh(polys: &[Polygon], offset: DVec3) -> crate::EditMesh {
     use std::collections::HashMap;
     let mut m = crate::EditMesh::default();
     let mut ids: HashMap<(i64, i64, i64), u32> = HashMap::new();
+    // faces seen already, by their corner set: a boolean of solids that
+    // touch keeps both solids' faces where they are coplanar, and a
+    // coincident pair rides into the next boolean, which splits each
+    // against the other — a wall level with a slab grew five million
+    // triangles that way
+    let mut seen: std::collections::HashSet<Vec<u32>> = std::collections::HashSet::new();
     let key = |p: DVec3| {
         (
             (p.x * 1e6).round() as i64,
@@ -352,7 +446,14 @@ pub fn to_mesh(polys: &[Polygon], offset: DVec3) -> crate::EditMesh {
             }
         }
         if face.len() >= 3 {
-            m.faces.push(face);
+            // the same corners in the same turn is the face again
+            let mut set = face.clone();
+            let min = *set.iter().min().unwrap();
+            let at = set.iter().position(|&v| v == min).unwrap();
+            set.rotate_left(at);
+            if seen.insert(set) {
+                m.faces.push(face);
+            }
         }
     }
     m
@@ -393,5 +494,36 @@ mod tests {
         );
         let d = boolean(wall, hole, BoolOp::Difference);
         assert!((volume(&d) - (4.0 * 0.2 * 3.0 - 0.2)).abs() < 1e-6);
+    }
+
+    // The script-walls hang: walls whose top face is coplanar with the
+    // slab's top face, punched one after another into the same slab. Each
+    // cut adds a notch's worth of faces (about nine here) and no more.
+    #[test]
+    fn repeated_wall_cuts_do_not_explode() {
+        // the FF slab of the demo: 10×6, 0.3 thick, top at z=3.0
+        let slab = from_mesh(
+            &EditMesh::cuboid(DVec3::new(10.0, 6.0, 0.3)),
+            DVec3::new(5.0, 3.0, 2.85),
+        );
+        let slab_tris = to_mesh(&slab, DVec3::ZERO).faces.len();
+        let mut current = slab;
+        // ten script walls: 0.1 thick, full level height (top face z=3.0
+        // coplanar with the slab's top face), one every 0.889 m
+        for i in 0..10 {
+            let x = i as f64 * 8.0 / 9.0;
+            let wall = from_mesh(
+                &EditMesh::cuboid(DVec3::new(0.1, 4.0, 3.0)),
+                DVec3::new(x, 2.0, 1.5),
+            );
+            current = boolean(current, wall, BoolOp::Difference);
+            let n = to_mesh(&current, DVec3::ZERO).faces.len();
+            // a clean cut adds a bounded few faces; sliver breeding runs
+            // away by times four and more per cut
+            assert!(
+                n <= slab_tris + 20 * (i + 1),
+                "cut {i} blew up: {slab_tris} -> {n}"
+            );
+        }
     }
 }
