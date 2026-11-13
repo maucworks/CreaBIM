@@ -24,13 +24,18 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install "pdoc>=15,<17"
-      - name: Build the creabim builder reference
+      - name: Build the script-author reference
+        # One site for script authors: the `creabim` builders plus the
+        # `geometrykit` math they sample Paths and Curves from. geometrykit
+        # installs unpinned, like scripts get it via ensure_packages, so
+        # the reference always matches what authors actually import.
         # The package docstring is the landing page (protocol, registry,
         # Route B); the full guide lives in docs/scripting-guide.md,
         # read on GitHub next to the other hand-written docs.
         run: |
+          python -m pip install geometrykit
           PYTHONPATH=crates/creabim-script/python \
-            python -m pdoc --docformat google -o docs/_build creabim
+            python -m pdoc --docformat google -o docs/_build creabim geometrykit
       - uses: actions/upload-pages-artifact@v3
         with:
           path: docs/_build

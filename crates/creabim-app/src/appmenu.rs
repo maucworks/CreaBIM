@@ -924,6 +924,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn new_script_inserts_selects_and_names_uniquely() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.run_action(&ctx, "new.script");
+        let scripts: Vec<String> = app
+            .doc
+            .model()
+            .iter()
+            .filter(|e| matches!(e.kind, ElementKind::ScriptObject(_)))
+            .map(|e| e.name.clone())
+            .collect();
+        assert_eq!(scripts, vec!["Script".to_string()]);
+        assert!(app.selection.contains(
+            app.doc
+                .model()
+                .iter()
+                .find(|e| e.name == "Script")
+                .unwrap()
+                .id
+        ));
+        app.run_action(&ctx, "new.script");
+        let names: Vec<String> = app
+            .doc
+            .model()
+            .iter()
+            .filter(|e| matches!(e.kind, ElementKind::ScriptObject(_)))
+            .map(|e| e.name.clone())
+            .collect();
+        assert!(names.contains(&"Script 2".to_string()), "{names:?}");
+    }
+
+    #[test]
     fn new_3d_view_inserts_activates_and_names_uniquely() {
         let ctx = egui::Context::default();
         let mut app = test_app();

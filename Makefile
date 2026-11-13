@@ -86,10 +86,10 @@ fmt-check: ## fail when anything needs formatting, like CI
 
 lint: fmt-check clippy ## CI's static gates, local
 
-docs: ## build the creabim builder API reference locally (needs pip + pdoc)
-	python3 -m pip install --quiet "pdoc>=15,<17"
+docs: ## build the script-author reference (creabim + geometrykit) locally
+	python3 -m pip install --quiet "pdoc>=15,<17" geometrykit
 	PYTHONPATH=crates/creabim-script/python \
-		python3 -m pdoc --docformat google -o docs/_build creabim
+		python3 -m pdoc --docformat google -o docs/_build creabim geometrykit
 	@echo "open docs/_build/index.html; the guide is docs/scripting-guide.md"
 
 bless: ## regenerate docs/json-format.md and the JSON schema from the format

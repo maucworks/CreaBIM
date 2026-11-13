@@ -459,7 +459,7 @@ fn execute(
         match materialize(model, &key, op, &hosts) {
             Ok((k, el)) => {
                 if let ElementKind::Wall(w) = &el.kind {
-                    hosts.insert(k.clone(), (el.id, w.thickness));
+                    hosts.insert(k.clone(), (el.id, w.clone()));
                 }
                 out.push((k, el));
             }
@@ -501,7 +501,7 @@ fn materialize(
     model: &Model,
     key: &str,
     op: OpItem,
-    hosts: &std::collections::HashMap<String, (ElementId, f64)>,
+    hosts: &std::collections::HashMap<String, (ElementId, Wall)>,
 ) -> Result<(String, Element), String> {
     // Exactly one op per item; hosted ops (opening/door/window) resolve
     // after the host-less pass, so a script can cut a hole in a wall it
@@ -632,24 +632,24 @@ fn materialize_mesh(key: &str, m: MeshOp) -> Result<(String, Element), String> {
 
 /// Resolve an opening's host wall: a key of a wall op materialized in
 /// the same run first (the script's own namespace — the fresh wall is
-/// not in the model yet, so its id and thickness come along), then an
-/// element name in the model. Anything else — or a non-wall — is an
-/// error naming the op key.
+/// not in the model yet, so its element rides along), then an element
+/// name in the model. Anything else — or a non-wall — is an error
+/// naming the op key.
 fn resolve_host(
     model: &Model,
     key: &str,
-    hosts: &std::collections::HashMap<String, (ElementId, f64)>,
+    hosts: &std::collections::HashMap<String, (ElementId, Wall)>,
     host: &str,
-) -> Result<(ElementId, f64), String> {
-    if let Some(found) = hosts.get(host) {
-        return Ok(*found);
+) -> Result<(ElementId, Wall), String> {
+    if let Some((id, wall)) = hosts.get(host) {
+        return Ok((*id, wall.clone()));
     }
     let found = model
         .iter()
         .find(|e| e.name == *host)
         .ok_or_else(|| format!("op {key:?}: no wall named {host:?} (or op key)"))?;
     match &found.kind {
-        ElementKind::Wall(w) => Ok((found.id, w.thickness)),
+        ElementKind::Wall(w) => Ok((found.id, w.clone())),
         _ => Err(format!("op {key:?}: {host:?} is not a wall")),
     }
 }
@@ -658,7 +658,7 @@ fn resolve_host(
 fn materialize_opening(
     model: &Model,
     key: &str,
-    hosts: &std::collections::HashMap<String, (ElementId, f64)>,
+    hosts: &std::collections::HashMap<String, (ElementId, Wall)>,
     kind: OpeningKind,
     host: String,
     offset: Option<f64>,
@@ -672,7 +672,7 @@ fn materialize_opening(
     mark: Option<String>,
     what: &str,
 ) -> Result<(String, Element), String> {
-    let (host, thickness) = resolve_host(model, key, hosts, &host)?;
+    let (host, wall) = resolve_host(model, key, hosts, &host)?;
     if width <= 0.0 || height <= 0.0 {
         return Err(format!("op {key:?}: width and height must be positive"));
     }
@@ -680,17 +680,40 @@ fn materialize_opening(
     if offset < 0.0 {
         return Err(format!("op {key:?}: offset must not be negative"));
     }
+    let sill = sill.unwrap_or(0.0);
+    if sill < 0.0 {
+        return Err(format!("op {key:?}: sill must not be negative"));
+    }
+    // The opening must sit on its host, not past its end or above its
+    // top: arc length round a curved host (the fresh wall rides along
+    // in `hosts`, so same-run arcs check too). Without this a typo
+    // commits floating joinery that only shows up in the drawing.
+    let host_len = match wall.curve() {
+        creabim_core::sketch::Curve::Line(a, b) => a.distance(b),
+        creabim_core::sketch::Curve::Arc { radius, sweep, .. } => sweep.abs() * radius,
+    };
+    if offset + width > host_len + 1e-6 {
+        return Err(format!(
+            "op {key:?}: offset {offset} + width {width} runs past the host's end ({host_len:.1})"
+        ));
+    }
+    if sill + height > wall.height + 1e-6 {
+        return Err(format!(
+            "op {key:?}: sill {sill} + height {height} runs past the host's top ({:.1})",
+            wall.height
+        ));
+    }
     let mut element = Element::new(
         name.unwrap_or_else(|| format!("{what} {key}")),
         ElementKind::Opening(Opening {
             host,
             kind,
             offset,
-            sill: sill.unwrap_or(0.0),
+            sill,
             width,
             height,
             material: None,
-            frame: frame.fitted(width, height, thickness),
+            frame: frame.fitted(width, height, wall.thickness),
             flip_hand,
             flip_facing,
         }),
@@ -1092,6 +1115,14 @@ mod tests {
             (
                 "\"w\"",
                 "from creabim import window\nOUTPUTS = [window(\"w\", \"Ground\")]",
+            ),
+            (
+                "\"past\"",
+                "from creabim import wall, door\nOUTPUTS = [wall(\"h\", \"Ground\", [0.0, 0.0], [2.0, 0.0]), door(\"past\", \"h\", offset=1.5)]",
+            ),
+            (
+                "\"tall\"",
+                "from creabim import wall, window\nOUTPUTS = [wall(\"h\", \"Ground\", [0.0, 0.0], [4.0, 0.0]), window(\"tall\", \"h\", offset=1.0, sill=2.0)]",
             ),
         ] {
             let script = Element::new(

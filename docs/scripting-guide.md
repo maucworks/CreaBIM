@@ -3,9 +3,10 @@
 Script blocks generate native CreaBIM elements from Python. This guide
 covers the whole loop: declaring inputs, emitting outputs, linking the
 block to a file on disc, and how re-runs keep element identity. The
-function reference for the builder package lives on the API site
-(python API, `creabim` module); what follows is the protocol the
-reference assumes.
+function reference for the builder package — and the geometrykit
+math it samples `Path`s and `Curve`s from — lives on the API site
+(python API, `creabim` and `geometrykit` modules); what follows is
+the protocol the reference assumes.
 
 ## The protocol in brief
 
@@ -85,7 +86,48 @@ Hosted ops (`opening`/`door`/`window`) name their host wall by
 element name — or by the key of a wall op in the *same* `OUTPUTS`
 list, so a script can cut a hole in a wall it builds in the same
 run. Same-run keys win over element names; the host must be a wall.
-`mark` feeds the door/window schedules.
+`mark` feeds the door/window schedules. The host must fit the
+opening: `offset + width` within the wall's length (arc length
+round a curved wall), `sill + height` within its height — overshoot
+fails the run naming the op key instead of floating joinery.
+
+## Paths to walls
+
+Straightforward runs of `Line` segments become straight walls;
+fillet arcs become arc walls — never segments. Sample the
+geometrykit `Path` in the script and pass plain points to `walls()`
+for the segmented fallback, or walk `path.segments` and emit
+`wall()` per `Line`, `arc_wall()` per `Arc` (centre, start and
+sweep pass straight through):
+
+```python
+from geometrykit import Arc, Path, Vec
+from creabim import arc_wall, wall
+
+footprint = Path.from_pts(
+    [Vec(0, 0, 0), Vec(6, 0, 0), Vec(6, 4, 0), Vec(0, 4, 0)], closed=True
+)
+footprint.fillet([0, 1, 2, 3], 0.5)
+
+OUTPUTS = []
+for i, s in enumerate(footprint.segments):
+    key = f"c-wall-{i}"
+    if isinstance(s, Arc):
+        OUTPUTS.append(arc_wall(
+            key, "Ground Floor",
+            [s.center.x, s.center.y], [s.start.x, s.start.y],
+            s.angle, thickness=0.2,
+        ))
+    else:
+        OUTPUTS.append(wall(
+            key, "Ground Floor",
+            [s.start.x, s.start.y], [s.end.x, s.end.y], thickness=0.2,
+        ))
+```
+
+`arc_wall` takes the arc's centre, start and counter-clockwise
+sweep; full circles need splitting (two semicircles). The join
+solver corners shared endpoints cleanly, arcs included.
 
 ## Disc sources and the registry
 

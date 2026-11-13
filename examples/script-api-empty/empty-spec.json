@@ -1,0 +1,10 @@
+{
+  "$schema": "../../src/creabim/docs/creabim-model.schema.json",
+  "version": 1,
+  "units": "m",
+  "display_units": { "length": "mm" },
+
+  "levels": [
+    { "id": "Ground Floor", "elevation": 0.0, "height": 2.7 }
+  ]
+}

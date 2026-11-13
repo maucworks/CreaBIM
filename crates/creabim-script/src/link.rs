@@ -176,7 +176,13 @@ pub fn link_from_embedded(
 /// The mtime fingerprint (count + newest mtime) guards the re-read: the
 /// app polls every frame, and stat is cheap where reads are not.
 pub fn digest(project_dir: &Path) -> Option<String> {
-    static CACHE: Mutex<Option<(Fingerprint, String)>> = Mutex::new(None);
+    // Keyed by project directory: two projects with identical layouts
+    // must never share a digest (a single global slot would serve
+    // project A's digest to project B after a stat tie).
+    static CACHE: std::sync::OnceLock<
+        Mutex<std::collections::HashMap<PathBuf, (Fingerprint, String)>>,
+    > = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
     let dir = scripts_dir(project_dir);
     let mut files: Vec<(PathBuf, std::time::SystemTime, u64)> = Vec::new();
     for entry in std::fs::read_dir(&dir).ok()? {
@@ -202,8 +208,8 @@ pub fn digest(project_dir: &Path) -> Option<String> {
             .unwrap_or(std::time::UNIX_EPOCH),
         bytes: files.iter().map(|f| f.2).sum(),
     };
-    if let Ok(cache) = CACHE.lock() {
-        if let Some((seen, digest)) = cache.as_ref() {
+    if let Ok(cache) = cache.lock() {
+        if let Some((seen, digest)) = cache.get(project_dir) {
             if *seen == fingerprint {
                 return Some(digest.clone());
             }
@@ -218,8 +224,8 @@ pub fn digest(project_dir: &Path) -> Option<String> {
         h.write(&text);
     }
     let digest = format!("{:016x}", h.finish());
-    if let Ok(mut cache) = CACHE.lock() {
-        *cache = Some((fingerprint, digest.clone()));
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(project_dir.to_path_buf(), (fingerprint, digest.clone()));
     }
     Some(digest)
 }
@@ -326,6 +332,22 @@ mod tests {
             "x = 3\n"
         );
         assert_eq!(refresh(&s, Some(&r), &dir).unwrap(), None);
+    }
+
+    #[test]
+    fn digest_is_per_project_directory() {
+        // Two identical layouts must not share a digest: regression
+        // guard for the dir-keyed cache.
+        let a = tempdir("digest-a");
+        let b = tempdir("digest-b");
+        for dir in [&a, &b] {
+            std::fs::create_dir_all(dir.join("scripts")).unwrap();
+            std::fs::write(dir.join("scripts/main.py"), "x = 1\n").unwrap();
+        }
+        let first = digest(&a).unwrap();
+        std::fs::write(b.join("scripts/main.py"), "x = 2\n").unwrap();
+        assert_eq!(digest(&a).unwrap(), first);
+        assert_ne!(digest(&b).unwrap(), first);
     }
 
     #[test]

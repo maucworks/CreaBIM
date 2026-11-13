@@ -6892,6 +6892,29 @@ impl CreaBimApp {
         );
     }
 
+    /// A script block from a starter template, opened in the panel.
+    /// Embedded (unlinked): link it to `scripts/` from the panel once
+    /// the project is saved. The runner picks it up on its own.
+    fn new_script(&mut self) {
+        let used: Vec<String> = self.doc.model().iter().map(|e| e.name.clone()).collect();
+        let name = std::iter::once("Script".to_string())
+            .chain((2..).map(|n| format!("Script {n}")))
+            .find(|n| !used.contains(n))
+            .expect("unbounded");
+        let source = "# A script block: INPUTS in, OUTPUTS out. Press Run and the\n# outputs become native elements; re-running replaces them by key.\n# in: size: float = 1.0\nfrom creabim import mesh\n\ns = INPUTS[\"size\"]\nOUTPUTS = [mesh(\"pyramid\",\n                verts=[[0, 0, 0], [s, 0, 0], [s, s, 0], [0, s, 0],\n                       [s / 2, s / 2, s]],\n                faces=[[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4],\n                       [3, 2, 1, 0]])]\n";
+        let e = Element::new(
+            name,
+            ElementKind::ScriptObject(creabim_core::ScriptObject::new(source, "cpython")),
+        );
+        let id = e.id;
+        let r = self.doc.commit(Transaction::new("New script").insert(e));
+        self.selection.only(id);
+        self.report(
+            r,
+            "New script block, open in the panel. Press Run: the pyramid commits as a mesh; link it to scripts/ to edit it in an IDE.",
+        );
+    }
+
     /// A saved 3D (axonometric) view of the model, opened for orbiting.
     fn new_3d_view(&mut self) {
         let used: Vec<String> = self

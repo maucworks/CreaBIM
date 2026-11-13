@@ -48,6 +48,9 @@ jobs:
             echo "PYO3_PYTHON=$HOME_DIR/bin/python3.13" >> $GITHUB_ENV
             echo "LD_LIBRARY_PATH=$HOME_DIR/lib" >> $GITHUB_ENV
           fi
+          # the build script and the test binaries locate the bundle
+          # through this (build.rs refuses a silent system Python)
+          echo "CREABIM_PYTHON_HOME=${{ runner.temp }}/creabim-python" >> $GITHUB_ENV
         env:
           CREABIM_PYTHON_HOME: ${{ runner.temp }}/creabim-python
         shell: bash
@@ -70,6 +73,21 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install ifcopenshell pytest pypdf jsonschema
+      - name: Provision embedded Python
+        # creabim-cli links the bundled libpython (never a system one),
+        # same as the test job — and the home persists for the script
+        # runs below, so they don't re-download the bundle at runtime.
+        # CREABIM_PYTHON_HOME persists because build.rs locates the
+        # bundle through it (it refuses a silent system Python).
+        run: |
+          cargo run -p creabim-provision
+          HOME_DIR="${{ runner.temp }}/creabim-python/python"
+          echo "PYO3_PYTHON=$HOME_DIR/bin/python3.13" >> $GITHUB_ENV
+          echo "CREABIM_PYTHON_HOME=${{ runner.temp }}/creabim-python" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=$HOME_DIR/lib" >> $GITHUB_ENV
+        env:
+          CREABIM_PYTHON_HOME: ${{ runner.temp }}/creabim-python
+        shell: bash
       - run: cargo run -q -p creabim-cli -- sample house.creabim.json
       - run: cargo run -q -p creabim-cli -- ifc house.creabim.json house.ifc
       - run: python tools/validate_ifc.py house.ifc
@@ -94,6 +112,25 @@ jobs:
       - run: cargo run -q -p creabim-cli -- pdf house.creabim.json house.pdf
       - run: cargo run -q -p creabim-cli -- schedule house.creabim.json windows windows.csv
       - run: cargo run -q -p creabim-cli -- schedule house.creabim.json rooms rooms.csv
+      - name: Script-built arc walls validate as IFC
+        # End to end through the script API (M-S7): an arc wall plus a
+        # hosted door, built by a script, exported and validated —
+        # curved footprints must survive, not flatten to the chord.
+        run: |
+          cat > /tmp/arcwall.py <<'EOF'
+          import math
+          from creabim import arc_wall, door
+          OUTPUTS = [arc_wall("a", "Ground Floor", [0.0, 0.0], [4.0, 0.0], math.pi / 2)] + [
+              door("d", "a", offset=1.0, mark="D-A1"),
+          ]
+          EOF
+          cargo run -q -p creabim-cli -- sample /tmp/arc.creabim.json
+          cargo run -q -p creabim-cli -- script add /tmp/arc.creabim.json Arc /tmp/arcwall.py --embed
+          cargo run -q -p creabim-cli -- script run /tmp/arc.creabim.json Arc --out /tmp/arc.creabim.json
+          cargo run -q -p creabim-cli -- schedule /tmp/arc.creabim.json doors | grep D-A1
+          cargo run -q -p creabim-cli -- ifc /tmp/arc.creabim.json arc.ifc
+          python tools/validate_ifc.py arc.ifc
+          python -c "import ifcopenshell; m = ifcopenshell.open('arc.ifc'); arc = [w for w in m.by_type('IfcWall') if w.Name == 'wall a']; assert len(arc) == 1; assert len(m.by_type('IfcOpeningElement')) >= 1"
       - run: cargo run -q -p creabim-cli -- check house.creabim.json
       - name: PDF opens with a page per sheet
         run: python -c "import pypdf; r = pypdf.PdfReader('house.pdf', strict=True); n = len(r.pages); print(n, 'pages'); assert n == 13; assert 'ROOM SCHEDULE' in r.pages[11].extract_text().upper(); assert 'Ground Floor Plan' in r.pages[1].extract_text(); assert 'DOOR SCHEDULE' in r.pages[9].extract_text(); assert 'DETAIL' in r.pages[8].extract_text().upper()"
@@ -129,6 +166,20 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Provision embedded Python
+        # the app and CLI link the bundled libpython: download+verify
+        # first, then point PyO3 at it (build.rs refuses a silent
+        # system Python). Build-only job: no runtime path needed.
+        run: |
+          cargo run -p creabim-provision
+          HOME_DIR="${{ runner.temp }}/creabim-python/python"
+          echo "PYO3_PYTHON=$HOME_DIR/python.exe" >> $GITHUB_ENV
+          echo "CREABIM_PYTHON_HOME=${{ runner.temp }}/creabim-python" >> $GITHUB_ENV
+          echo "$HOME_DIR" >> $GITHUB_PATH
+          echo "$HOME_DIR/DLLs" >> $GITHUB_PATH
+        env:
+          CREABIM_PYTHON_HOME: ${{ runner.temp }}/creabim-python
+        shell: bash
       - run: cargo build --release -p creabim-app -p creabim-cli
       - uses: actions/upload-artifact@v4
         with:
