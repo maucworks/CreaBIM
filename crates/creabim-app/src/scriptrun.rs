@@ -36,18 +36,22 @@ const CONSOLE_CAP: usize = 8192;
 /// `DefaultHasher` is randomly seeded per instance, so hashes never
 /// match across calls). The model revision is deliberately excluded:
 /// it decides *whether* to run, while `commit` re-checks the element.
-#[derive(Clone, PartialEq, Eq)]
+/// `dir` is the scripts directory digest (M-S6): a changed helper
+/// module invalidates every script, linked or not.
+#[derive(Clone, PartialEq, Eq, Debug)]
 struct RequestKey {
     source: String,
     engine: String,
     inputs: String,
+    dir: Option<String>,
 }
 
-fn request_key(script: &ScriptObject) -> RequestKey {
+fn request_key(script: &ScriptObject, dir: Option<&str>) -> RequestKey {
     RequestKey {
         source: script.source.clone(),
         engine: script.engine.clone(),
         inputs: format!("{:?}", script.inputs),
+        dir: dir.map(String::from),
     }
 }
 
@@ -125,6 +129,9 @@ pub struct ScriptRunner {
     timeout: Duration,
     last_revision: u64,
     last_change: Instant,
+    /// The directory holding the project file (M-S6): where `scripts/`
+    /// lives. None for an unsaved project.
+    project_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for ScriptRunner {
@@ -139,6 +146,7 @@ impl Default for ScriptRunner {
             timeout: TIMEOUT,
             last_revision: 0,
             last_change: Instant::now(),
+            project_dir: None,
         }
     }
 }
@@ -150,6 +158,18 @@ impl ScriptRunner {
             timeout,
             ..Self::default()
         }
+    }
+
+    /// The project directory, for the app to set on open and save; a
+    /// changed path keeps per-element state (entries are keyed by id and
+    /// re-validated by the request key anyway).
+    pub fn set_project_dir(&mut self, dir: Option<std::path::PathBuf>) {
+        self.project_dir = dir;
+    }
+
+    /// The project directory, when scripts need to know where they live.
+    pub fn project_dir(&self) -> Option<&std::path::Path> {
+        self.project_dir.as_deref()
     }
 
     /// Run `id` as soon as the worker is free, bypassing the debounce.
@@ -321,7 +341,7 @@ impl ScriptRunner {
                 return false;
             }
         };
-        if request_key(&script) != key {
+        if request_key(&script, self.dir_digest().as_deref()) != key {
             return false;
         }
         if unchanged(&model, &script.outputs, &fresh) {
@@ -408,6 +428,12 @@ impl ScriptRunner {
         false
     }
 
+    /// The scripts-directory digest, cheap after the first read (the
+    /// digest caches on a stat fingerprint).
+    fn dir_digest(&self) -> Option<String> {
+        creabim_script::link::digest(self.project_dir.as_deref()?)
+    }
+
     fn maybe_start(&mut self, doc: &mut Document) -> bool {
         if self.running.is_some() {
             return false;
@@ -420,15 +446,60 @@ impl ScriptRunner {
         {
             return false;
         }
+        // Disc priority (M-S6): linked sources are read before anything
+        // else; a changed file lands in the model as its own undoable
+        // step, then the scan below sees the fresh source.
+        if let Some(dir) = &self.project_dir {
+            let linked: Vec<(creabim_core::ElementId, String, ScriptObject)> = doc
+                .model()
+                .iter()
+                .filter_map(|e| match &e.kind {
+                    ElementKind::ScriptObject(s) if s.link.is_some() => {
+                        Some((e.id, e.name.clone(), s.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let reg = creabim_core::registry_of(doc.model()).map(|(_, r)| r);
+            for (id, name, s) in linked {
+                match creabim_script::link::refresh(&s, reg.as_ref(), dir) {
+                    Ok(None) => {}
+                    Ok(Some(fresh)) => {
+                        let mut updated = s.clone();
+                        updated.source = fresh;
+                        let before = match doc.model().get(id).cloned() {
+                            Some(b) => b,
+                            None => continue,
+                        };
+                        let mut after = before.clone();
+                        after.kind = creabim_core::ElementKind::ScriptObject(updated);
+                        if let Err(err) = doc.commit(
+                            creabim_core::Transaction::new(format!(
+                                "script {name}: source from disc"
+                            ))
+                            .replace(before, after),
+                        ) {
+                            crate::actlog::line(format!(
+                                "script {name}: disc refresh failed: {err}"
+                            ));
+                        }
+                    }
+                    Err(err) => {
+                        crate::actlog::line(format!("script {name}: {err}"));
+                    }
+                }
+            }
+        }
         let model = doc.model();
         let revision = model.revision();
+        let dir_digest = self.dir_digest();
         // Forced runs jump the queue; otherwise scan for dirty scripts.
         let mut candidates: Vec<ElementId> = forced.into_iter().collect();
         if candidates.is_empty() {
             candidates.extend(model.iter().filter_map(|e| match &e.kind {
                 ElementKind::ScriptObject(s) => {
                     let entry = self.entries.get(&e.id);
-                    let key = request_key(s);
+                    let key = request_key(s, dir_digest.as_deref());
                     let known = entry.and_then(|en| en.last_key.clone());
                     let dirty = known != Some(key)
                         || (has_element_inputs(s)
@@ -448,7 +519,7 @@ impl ScriptRunner {
             },
             None => return false,
         };
-        let key = request_key(&script);
+        let key = request_key(&script, dir_digest.as_deref());
         let decls = match script.declared() {
             Ok(d) => d,
             Err(e) => {
@@ -496,6 +567,11 @@ impl ScriptRunner {
         let worker = tid.clone();
         let tx = self.tx.clone();
         let done_key = key.clone();
+        let imports = self
+            .project_dir
+            .as_deref()
+            .map(creabim_script::link::scripts_dir)
+            .map(Arc::new);
         std::thread::spawn(move || {
             creabim_geom::prio::background();
             let t0 = Instant::now();
@@ -511,7 +587,13 @@ impl ScriptRunner {
                 Err(e) => Err((format!("provisioning failed: {e}"), String::new())),
                 Ok(home) => {
                     let engine = CPythonEngine::new(home);
-                    let traced = engine.run_traced(&snapshot, &script, &inputs, &worker);
+                    let traced = engine.run_traced(
+                        &snapshot,
+                        &script,
+                        &inputs,
+                        imports.as_deref().map(|p| p.as_path()),
+                        &worker,
+                    );
                     match traced.result {
                         Ok(fresh) => Ok((fresh, traced.console)),
                         Err(e) => Err((e.to_string(), traced.console)),
@@ -682,5 +764,85 @@ mod tests {
             matches!(r.status(id), Status::TimedOut)
         });
         assert_eq!(walls(&doc), 0);
+    }
+
+    fn tempdir(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("creabim-runner-test-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn doc_with_linked_script(source: &str, entry: &str, rel: &str) -> (Document, ElementId) {
+        let (mut doc, id) = doc_with_script(source);
+        let tx = creabim_core::set_link_tx(doc.model(), id, entry, rel).unwrap();
+        doc.commit(tx).unwrap();
+        (doc, id)
+    }
+
+    const HOSTED_SCRIPT: &str = "from creabim import wall, door\nOUTPUTS = [wall(\"w-0\", \"Ground\", [0.0, 0.0], [4.0, 0.0]), door(\"d-0\", \"w-0\", offset=1.0)]\n";
+
+    #[test]
+    fn hosted_outputs_commit_on_the_runner_path() {
+        // The reported app failure: a door hosted on a same-run wall
+        // committed fine headless (CLI) but failed in the app with
+        // "references missing element" — the runner never remapped
+        // fresh host ids. Both paths now come through reconcile.
+        let (mut doc, id) = doc_with_script(HOSTED_SCRIPT);
+        let mut runner = ScriptRunner::default();
+        for _ in 0..2 {
+            runner.force(id);
+            pump_until(&mut runner, &mut doc, id, 120, |r, _| {
+                matches!(r.status(id), Status::Ok { .. })
+            });
+        }
+        let door = doc
+            .model()
+            .iter()
+            .find(|e| e.name == "door d-0")
+            .expect("script door committed");
+        let host = match &door.kind {
+            ElementKind::Opening(o) => o.host,
+            _ => panic!("door d-0 is not an opening"),
+        };
+        assert!(
+            matches!(
+                doc.model().get(host).map(|e| &e.kind),
+                Some(ElementKind::Wall(_))
+            ),
+            "door hosts the stored wall after two runner commits"
+        );
+    }
+
+    #[test]
+    fn helper_edit_changes_every_scripts_request_key() {
+        let dir = tempdir("digest-key");
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(dir.join("scripts/main.py"), "x = 1\n").unwrap();
+        let s = ScriptObject::new(PARTITIONS, "cpython");
+        let before = request_key(&s, creabim_script::link::digest(&dir).as_deref());
+        std::fs::write(dir.join("scripts/helpers.py"), "X = 1\n").unwrap();
+        let after = request_key(&s, creabim_script::link::digest(&dir).as_deref());
+        assert_ne!(before, after, "a new helper must dirty every script");
+    }
+
+    #[test]
+    fn linked_script_is_adopted_from_disc_before_running() {
+        let dir = tempdir("linked-run");
+        // The embedded copy is stale on purpose: the disc copy wins.
+        let (mut doc, id) =
+            doc_with_linked_script("OUTPUTS = []\n", "partitions", "scripts/partitions.py");
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(dir.join("scripts/partitions.py"), PARTITIONS).unwrap();
+        let mut runner = ScriptRunner::default();
+        runner.set_project_dir(Some(dir));
+        pump_until(&mut runner, &mut doc, id, 120, |r, d| {
+            walls(d) == 4 && matches!(r.status(id), Status::Ok { .. })
+        });
+        match &doc.model().get(id).unwrap().kind {
+            ElementKind::ScriptObject(s) => assert_eq!(s.source, PARTITIONS),
+            _ => panic!("not a script block"),
+        }
     }
 }

@@ -344,6 +344,26 @@ pub fn open_folder(dir: &Path) -> Result<(), String> {
         .map_err(|e| format!("couldn't open {}: {e}", dir.display()))
 }
 
+/// Open `file` with the system's default handler (the editor, for a
+/// linked script's `.py`).
+pub fn open_file(file: &Path) -> Result<(), String> {
+    if cfg!(test) {
+        return Ok(());
+    }
+    let program = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(program)
+        .arg(file)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("couldn't open {}: {e}", file.display()))
+}
+
 /// Ask where to save, starting from `current`.
 pub fn pick_save(current: &str, title: &str, ext: &str) -> Option<String> {
     // a project not saved yet starts in the folder CreaBIM was started in

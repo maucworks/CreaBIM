@@ -40,7 +40,7 @@ ifneq ($(OS),Windows_NT)
 export RUSTFLAGS := $(RUSTFLAGS) -C link-args=-Wl,-rpath,$(PY_HOME)/lib
 endif
 
-.PHONY: help setup env build rebuild run run-release cli test check clippy fmt fmt-check lint bless validate-ifc python clean distclean
+.PHONY: help setup env build rebuild run run-release cli test check clippy fmt fmt-check lint bless validate-ifc python docs clean distclean
 
 help: ## list these shortcuts
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -85,6 +85,12 @@ fmt-check: ## fail when anything needs formatting, like CI
 	cargo fmt --all --check
 
 lint: fmt-check clippy ## CI's static gates, local
+
+docs: ## build the creabim builder API reference locally (needs pip + pdoc)
+	python3 -m pip install --quiet "pdoc>=15,<17"
+	PYTHONPATH=crates/creabim-script/python \
+		python3 -m pdoc --docformat google -o docs/_build creabim
+	@echo "open docs/_build/index.html; the guide is docs/scripting-guide.md"
 
 bless: ## regenerate docs/json-format.md and the JSON schema from the format
 	CREABIM_BLESS=1 cargo test -p creabim-spec

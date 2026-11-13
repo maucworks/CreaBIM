@@ -12,16 +12,114 @@ use eframe::egui;
 use std::sync::Arc;
 
 /// Edit a script element's inputs and source; Run/Stop the runner.
-/// Returns the undo label when the element changed.
+/// Returns the undo label when the element changed. Linking and
+/// embedding also touch the project's script registry, committed
+/// straight to `doc`; the `s` edit itself commits through the label.
 pub fn script_panel(
     ui: &mut egui::Ui,
     runner: &mut ScriptRunner,
-    doc: &creabim_core::Document,
+    doc: &mut creabim_core::Document,
     id: ElementId,
     s: &mut ScriptObject,
 ) -> Option<&'static str> {
     let mut label = None;
     ui.label(format!("Engine: {}", s.engine));
+
+    // Disc source of truth (M-S6): the block names a registry entry and
+    // the registry maps it onto a file; edits in the panel are written
+    // straight back to that file.
+    let dir = runner.project_dir().map(|d| d.to_path_buf());
+    let reg = creabim_core::registry_of(doc.model()).map(|(_, r)| r);
+    match s.link.clone() {
+        Some(entry) => {
+            let path = reg.as_ref().and_then(|r| r.path_of(&entry));
+            ui.horizontal(|ui| {
+                match path {
+                    Some(p) => {
+                        ui.label(egui::RichText::new(format!("Linked: {p}")).weak());
+                        if let Some(d) = &dir {
+                            if ui.small_button("Open in editor").clicked() {
+                                if let Err(e) = crate::files::open_file(&d.join(p)) {
+                                    ui.colored_label(egui::Color32::RED, e);
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        ui.colored_label(
+                            egui::Color32::RED,
+                            format!("Entry {entry:?} is not in the registry — embedded copy runs."),
+                        );
+                    }
+                }
+                if ui.small_button("Embed").clicked() {
+                    // drop the link (pruning the entry when unused); the
+                    // file is left on disc untouched
+                    match creabim_core::drop_link_tx(doc.model(), id) {
+                        Ok(tx) => match doc.commit(tx) {
+                            Ok(()) => {
+                                s.link = None;
+                                label = Some("Embed script");
+                            }
+                            Err(e) => {
+                                ui.colored_label(egui::Color32::RED, e.to_string());
+                            }
+                        },
+                        Err(e) => {
+                            ui.colored_label(egui::Color32::RED, e);
+                        }
+                    }
+                }
+            });
+            if path.is_some() {
+                ui.label(
+                    egui::RichText::new(
+                        "The file is the source of truth; edits here are written to it.",
+                    )
+                    .weak(),
+                );
+            }
+        }
+        None => {
+            let name = doc
+                .model()
+                .get(id)
+                .map(|e| e.name.clone())
+                .unwrap_or_default();
+            ui.horizontal(|ui| {
+                let b = ui.add_enabled(dir.is_some(), egui::Button::new("Link to scripts/…"));
+                if b.clicked() {
+                    if let Some(d) = &dir {
+                        match creabim_script::link::link_from_embedded(d, &name, s) {
+                            Ok((entry, rel)) => {
+                                match creabim_core::set_link_tx(doc.model(), id, &entry, &rel) {
+                                    Ok(tx) => match doc.commit(tx) {
+                                        Ok(()) => {
+                                            s.link = Some(entry);
+                                            label = Some("Link script");
+                                        }
+                                        Err(e) => {
+                                            ui.colored_label(egui::Color32::RED, e.to_string());
+                                        }
+                                    },
+                                    Err(e) => {
+                                        ui.colored_label(egui::Color32::RED, e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                crate::actlog::line(format!("script {name}: {e}"));
+                                ui.colored_label(egui::Color32::RED, e);
+                            }
+                        }
+                    }
+                }
+                if dir.is_none() {
+                    ui.label(egui::RichText::new("Save the project to link its scripts").weak());
+                }
+            });
+        }
+    }
 
     match s.declared() {
         Err(e) => {
@@ -47,6 +145,14 @@ pub fn script_panel(
         .layouter(&mut layouter);
     if ui.add(editor).changed() {
         label = Some("Edit script");
+        // Write the panel's edit straight to the linked file (M-S6):
+        // the disc copy must not go stale behind the model.
+        if let Some(d) = &dir {
+            let reg = creabim_core::registry_of(doc.model()).map(|(_, r)| r);
+            if let Err(e) = creabim_script::link::write_through(s, reg.as_ref(), d) {
+                ui.colored_label(egui::Color32::RED, e);
+            }
+        }
     }
 
     ui.horizontal(|ui| {

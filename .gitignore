@@ -4,3 +4,6 @@ target/
 .DS_Store
 !crates/*/fixtures/*.ifc
 !crates/*/fixtures/thirdparty/*.ifc
+docs/_build/
+__pycache__/
+*.pyc

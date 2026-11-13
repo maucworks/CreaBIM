@@ -115,7 +115,8 @@ impl Element {
             ElementKind::Units(_)
             | ElementKind::Project(_)
             | ElementKind::MarkRules(_)
-            | ElementKind::StylePack(_) => vec![],
+            | ElementKind::StylePack(_)
+            | ElementKind::ScriptRegistry(_) => vec![],
             // types are soft too: an element whose type is gone keeps its values
             ElementKind::ElementType(_) => vec![],
             // a shaft's top level is soft: without it the shaft stops at
@@ -181,6 +182,7 @@ impl Element {
             ElementKind::Assembly(_) => "IfcMaterialLayerSet",
             ElementKind::Dimension(_) => "Dimension",
             ElementKind::ScriptObject(_) => "Script",
+            ElementKind::ScriptRegistry(_) => "ScriptRegistry",
             ElementKind::Tag(_) => "Tag",
             ElementKind::Note(_) => "Note",
             ElementKind::TextStyle(_) => "TextStyle",
@@ -400,6 +402,7 @@ impl Element {
             }
             ElementKind::Detail(d) => d.validate(),
             ElementKind::ScriptObject(s) => s.validate(),
+            ElementKind::ScriptRegistry(r) => r.validate(),
             ElementKind::Cut(c) => {
                 if c.target == c.cutter {
                     Err("an element can't cut itself".into())
@@ -498,6 +501,9 @@ pub enum ElementKind {
     /// A script block: source plus engine, inputs and outputs. The block
     /// itself draws nothing; its outputs are ordinary elements.
     ScriptObject(crate::script::ScriptObject),
+    /// The script registry: the project's link table between script
+    /// blocks and disc modules. One per model; blocks name an entry.
+    ScriptRegistry(crate::script::ScriptRegistry),
 }
 
 impl ElementKind {
@@ -516,6 +522,7 @@ impl ElementKind {
             ElementKind::Material(_) => "Material",
             ElementKind::Dimension(_) => "Dimension",
             ElementKind::ScriptObject(_) => "Script",
+            ElementKind::ScriptRegistry(_) => "ScriptRegistry",
             ElementKind::Tag(_) => "Tag",
             ElementKind::Sketch(_) => "Sketch",
             ElementKind::Cut(_) => "Cut",

@@ -69,10 +69,37 @@ usage: (<model> is a .creabim project or a legacy .creabim.json file)
   creabim script list <model>          list the model's script blocks
   creabim script run <model> <name|id> [--out <model>] [--param k=v ...]
                                        run a script block, committing its
-                                       outputs as one undoable step
+                                       outputs as one undoable step; a
+                                       linked block's file is read first
+                                       (the disc is the source of truth)
   creabim script add <model> <name> <file.py> [--out <model>] [--engine e]
-                                       [--require pkg ...]
-                                       add a script block from a file
+                                       [--require pkg ...] [--embed]
+                                       add a script block from a file;
+                                       by default it is copied into the
+                                       project's scripts/ directory and
+                                       linked (the file outranks the
+                                       model); --embed keeps it in the
+                                       model only
+  creabim script link <model> <name|id> [--out <model>] [--file <path>]
+                                       [--as <entry>]
+                                       register the block's scripts/<slug>.py
+                                       entrance point (its source moves
+                                       there); --file adopts that file
+                                       instead; --as names the registry
+                                       entry — with no --file it attaches
+                                       to an existing entry, sharing it
+  creabim script export <model> <name|id> <file.py>
+                                       write a block's source to a file
+  creabim script embed <model> <name|id> [--out <model>]
+                                       drop the block's link (pruning the
+                                       registry entry when unused),
+                                       keeping the source in the model
+  creabim script registry list <model>
+                                       show the registered disc modules
+                                       and which blocks use them
+  creabim script registry remove <model> <entry> [--out <model>]
+                                       drop a registry entry; linked
+                                       blocks fall back to embedded
   creabim stats <model>                count elements by IFC class
   creabim check <model>                list objects standing in doorways or in
                                        a door's swing, and wall layers moved
@@ -363,6 +390,8 @@ fn main() -> ExitCode {
             .and_then(|r| save_import(r, out)),
         ["script", "list", input] => load(input)
             .map(|m| {
+                let dir = creabim_script::link::project_dir_of(std::path::Path::new(input));
+                let reg = creabim_core::registry_of(&m).map(|(_, r)| r);
                 let mut n = 0;
                 for e in m.iter() {
                     if let creabim_core::ElementKind::ScriptObject(s) = &e.kind {
@@ -371,13 +400,38 @@ fn main() -> ExitCode {
                             Ok(d) => format!("{} inputs", d.len()),
                             Err(e) => format!("bad header: {e}"),
                         };
+                        let linked = match &s.link {
+                            Some(name) => match reg
+                                .as_ref()
+                                .and_then(|r| r.path_of(name))
+                            {
+                                Some(p) => {
+                                    let fresh = dir
+                                        .as_deref()
+                                        .and_then(|d| {
+                                            creabim_script::link::refresh(s, reg.as_ref(), d)
+                                                .ok()
+                                                .flatten()
+                                        })
+                                        .is_some();
+                                    if fresh {
+                                        format!(" (changed on disc: {p})")
+                                    } else {
+                                        format!(" (linked: {p})")
+                                    }
+                                }
+                                None => format!(" (entry {name:?} not in the registry)"),
+                            },
+                            None => " (embedded)".to_string(),
+                        };
                         println!(
-                            "{} {} engine={} {} outputs={}",
+                            "{} {} engine={} {} outputs={}{}",
                             e.name,
                             e.id.0,
                             s.engine,
                             status,
-                            s.outputs.len()
+                            s.outputs.len(),
+                            linked
                         );
                     }
                 }
@@ -387,6 +441,13 @@ fn main() -> ExitCode {
             }),
         ["script", "run", input, name, rest @ ..] => script_run(input, name, rest),
         ["script", "add", input, name, source, rest @ ..] => script_add(input, name, source, rest),
+        ["script", "link", input, name, rest @ ..] => script_link(input, name, rest),
+        ["script", "export", input, name, file] => script_export(input, name, file),
+        ["script", "embed", input, name, rest @ ..] => script_embed(input, name, rest),
+        ["script", "registry", "list", input] => script_registry_list(input),
+        ["script", "registry", "remove", input, name, rest @ ..] => {
+            script_registry_remove(input, name, rest)
+        }
         ["ifcx", input, out] => load(input)
             .and_then(|m| std::fs::write(out, export_ifcx(&m)).map_err(|e| e.to_string())),
         ["import-ifcx", input, out] => read_text(input)
@@ -520,30 +581,73 @@ fn script_run(input: &str, name: &str, rest: &[&str]) -> Result<(), String> {
         }
     }
     let model = load(input)?;
+    let project_dir = creabim_script::link::project_dir_of(std::path::Path::new(input));
     let found = model
         .iter()
         .find(|e| e.name == *name || e.id.0.to_string() == *name)
         .ok_or_else(|| format!("no script block named {name:?}"))?;
     let script_id = found.id;
+    let script_name = found.name.clone();
     let script = match &found.kind {
         creabim_core::ElementKind::ScriptObject(s) => s.clone(),
         _ => return Err(format!("{name:?} is not a script block")),
     };
+    // Disc priority (M-S6): the linked file outranks the embedded copy;
+    // a changed file is adopted first, as its own undoable step. The
+    // block names a registry entry; the registry maps it onto a path.
+    let mut doc = Document::from_model(model);
+    let reg = creabim_core::registry_of(doc.model()).map(|(_, r)| r);
+    let fresh_source = project_dir
+        .as_deref()
+        .map(|dir| creabim_script::link::refresh(&script, reg.as_ref(), dir))
+        .transpose()
+        .map_err(|e| e.to_string())?
+        .flatten();
+    if let Some(fresh) = fresh_source {
+        let before = doc
+            .model()
+            .get(script_id)
+            .cloned()
+            .ok_or("script vanished")?;
+        let mut after = before.clone();
+        if let creabim_core::ElementKind::ScriptObject(s) = &mut after.kind {
+            s.source = fresh;
+        }
+        doc.commit(
+            creabim_core::Transaction::new(format!("script {name}: source from disc"))
+                .replace(before, after),
+        )
+        .map_err(|e| e.to_string())?;
+        println!("script {script_name}: source updated from disc");
+    }
+    let model = doc.model();
+    let script = match &model.get(script_id).ok_or("script vanished")?.kind {
+        creabim_core::ElementKind::ScriptObject(s) => s.clone(),
+        _ => unreachable!("was a script block a moment ago"),
+    };
+    let imports = project_dir.map(|d| creabim_script::link::scripts_dir(&d));
     let decls = script
         .declared()
-        .map_err(|e| format!("{}: {e}", found.name))?;
+        .map_err(|e| format!("{script_name}: {e}"))?;
     let home = creabim_script::ensure_provisioned().map_err(|e| e.to_string())?;
     let reqs: Vec<&str> = script.requirements.iter().map(String::as_str).collect();
     if !reqs.is_empty() {
         creabim_script::ensure_packages(&reqs).map_err(|e| e.to_string())?;
     }
     let engine = creabim_script::CPythonEngine::new(home);
-    let inputs = creabim_script::resolve(&model, &decls, &script.inputs, &params)
+    let inputs = creabim_script::resolve(model, &decls, &script.inputs, &params)
         .map_err(|e| e.to_string())?;
-    let label = format!("script {}", found.name);
-    let (tx, _) =
-        creabim_script::run_to_transaction(&engine, &model, script_id, &script, &inputs, &label)
-            .map_err(|e| e.to_string())?;
+    let label = format!("script {script_name}");
+    let (tx, _) = creabim_script::run_to_transaction(
+        &engine,
+        model,
+        script_id,
+        &script,
+        &inputs,
+        &label,
+        imports.as_deref(),
+    )
+    .map_err(|e| e.to_string())?;
     let (mut added, mut replaced, mut removed) = (0, 0, 0);
     for op in &tx.ops {
         match op {
@@ -552,7 +656,6 @@ fn script_run(input: &str, name: &str, rest: &[&str]) -> Result<(), String> {
             creabim_core::Op::Remove(_) => removed += 1,
         }
     }
-    let mut doc = Document::from_model(model);
     doc.commit(tx).map_err(|e| e.to_string())?;
     if is_json(&out) {
         std::fs::write(&out, doc.model().to_json()).map_err(|e| format!("{out}: {e}"))
@@ -568,6 +671,7 @@ fn script_add(input: &str, name: &str, source: &str, rest: &[&str]) -> Result<()
     let mut out = input.to_string();
     let mut engine = "cpython".to_string();
     let mut requirements = vec![];
+    let mut embed = false;
     let mut it = rest.iter();
     while let Some(flag) = it.next() {
         match *flag {
@@ -590,6 +694,7 @@ fn script_add(input: &str, name: &str, source: &str, rest: &[&str]) -> Result<()
                         .to_string(),
                 );
             }
+            "--embed" => embed = true,
             other => return Err(format!("unknown flag {other:?}")),
         }
     }
@@ -597,19 +702,279 @@ fn script_add(input: &str, name: &str, source: &str, rest: &[&str]) -> Result<()
     let mut script = creabim_core::ScriptObject::new(text, engine);
     script.requirements = requirements;
     script.validate().map_err(|e| format!("{source}: {e}"))?;
+    // Disc source of truth (M-S6): the file is adopted into `scripts/`
+    // under the model's directory and registered, unless --embed keeps
+    // it inside the model only. The block names its registry entry; the
+    // registry maps the name onto the path.
+    let mut registered: Option<(String, String)> = None;
+    if !embed {
+        let project_file = std::path::Path::new(&out);
+        match creabim_script::link::project_dir_of(project_file) {
+            Some(dir) => {
+                let rel = creabim_script::link::adopt(&dir, name, std::path::Path::new(source))
+                    .map_err(|e| format!("{source}: {e}"))?;
+                // The embedded copy follows the adopted file so the two
+                // agree until the next disc edit.
+                script.source =
+                    std::fs::read_to_string(dir.join(&rel)).map_err(|e| e.to_string())?;
+                registered = Some((name.to_string(), rel));
+            }
+            None => {
+                return Err(
+                    "--out must name a file in a real directory to link a script".to_string(),
+                )
+            }
+        }
+    }
     let mut doc = Document::from_model(load(input)?);
-    doc.commit(
-        creabim_core::Transaction::new(format!("add script {name}")).insert(
-            creabim_core::Element::new(name, creabim_core::ElementKind::ScriptObject(script)),
-        ),
-    )
-    .map_err(|e| e.to_string())?;
+    let element = creabim_core::Element::new(name, creabim_core::ElementKind::ScriptObject(script));
+    let id = element.id;
+    doc.commit(creabim_core::Transaction::new(format!("add script {name}")).insert(element))
+        .map_err(|e| e.to_string())?;
+    if let Some((entry, rel)) = registered {
+        let tx =
+            creabim_core::set_link_tx(doc.model(), id, &entry, &rel).map_err(|e| e.to_string())?;
+        doc.commit(tx).map_err(|e| e.to_string())?;
+    }
     if is_json(&out) {
         std::fs::write(&out, doc.model().to_json()).map_err(|e| format!("{out}: {e}"))
     } else {
         creabim_store::save(&out, &doc).map_err(|e| format!("{out}: {e}"))
     }?;
-    println!("added script block {name:?}");
+    let how = if embed { "embedded" } else { "linked" };
+    println!("added script block {name:?} ({how})");
+    Ok(())
+}
+
+/// Find one script block by name or element id.
+fn find_script(
+    model: &creabim_core::Model,
+    name: &str,
+) -> Result<(creabim_core::ElementId, String, creabim_core::ScriptObject), String> {
+    let found = model
+        .iter()
+        .find(|e| e.name == *name || e.id.0.to_string() == *name)
+        .ok_or_else(|| format!("no script block named {name:?}"))?;
+    let script = match &found.kind {
+        creabim_core::ElementKind::ScriptObject(s) => s.clone(),
+        _ => return Err(format!("{name:?} is not a script block")),
+    };
+    Ok((found.id, found.name.clone(), script))
+}
+
+/// Save a document back to `out`, JSON or packed, as the script verbs do.
+fn save_script_doc(doc: &Document, out: &str) -> Result<(), String> {
+    if is_json(out) {
+        std::fs::write(out, doc.model().to_json()).map_err(|e| format!("{out}: {e}"))
+    } else {
+        creabim_store::save(out, doc).map_err(|e| format!("{out}: {e}"))
+    }
+}
+
+/// `script link`: register a block's `scripts/<slug>.py` entrance point
+/// and point the block at it. Without --file the current embedded
+/// source moves to the file; with --file the named file is adopted
+/// (copied in) and registered. --as names the registry entry
+/// (defaults to the block name): with no --file and an entry that
+/// already exists, the block simply attaches to it, sharing its module.
+fn script_link(input: &str, name: &str, rest: &[&str]) -> Result<(), String> {
+    let mut out = input.to_string();
+    let mut file: Option<String> = None;
+    let mut entry: Option<String> = None;
+    let mut it = rest.iter();
+    while let Some(flag) = it.next() {
+        match *flag {
+            "--out" => {
+                out = it
+                    .next()
+                    .ok_or_else(|| "--out needs a value".to_string())?
+                    .to_string()
+            }
+            "--file" => {
+                file = Some(
+                    it.next()
+                        .ok_or_else(|| "--file needs a value".to_string())?
+                        .to_string(),
+                )
+            }
+            "--as" => {
+                entry = Some(
+                    it.next()
+                        .ok_or_else(|| "--as needs a value".to_string())?
+                        .to_string(),
+                )
+            }
+            other => return Err(format!("unknown flag {other:?}")),
+        }
+    }
+    let model = load(input)?;
+    let (id, script_name, script) = find_script(&model, name)?;
+    let project_file = std::path::Path::new(&out);
+    let project_dir = creabim_script::link::project_dir_of(project_file)
+        .ok_or_else(|| "--out must name a file in a real directory to link a script".to_string())?;
+    let entry = entry.unwrap_or(script_name.clone());
+    let mut doc = Document::from_model(model);
+    let rel = match file {
+        Some(f) => {
+            let rel = creabim_script::link::adopt(&project_dir, &entry, std::path::Path::new(&f))
+                .map_err(|e| e.to_string())?;
+            // adopt copies the file in; the embedded copy follows it so
+            // the two agree until the next disc edit
+            let before = doc.model().get(id).cloned().ok_or("script vanished")?;
+            let mut after = before.clone();
+            if let creabim_core::ElementKind::ScriptObject(s) = &mut after.kind {
+                s.source =
+                    std::fs::read_to_string(project_dir.join(&rel)).map_err(|e| e.to_string())?;
+            }
+            doc.commit(
+                creabim_core::Transaction::new(format!("link script {entry}"))
+                    .replace(before, after),
+            )
+            .map_err(|e| e.to_string())?;
+            rel
+        }
+        None => {
+            // --as an existing entry with no --file attaches the block
+            // to that entry (sharing its module); otherwise the block's
+            // embedded source moves out to the entry's entrance point.
+            match creabim_core::registry_of(doc.model())
+                .and_then(|(_, r)| r.path_of(&entry).map(str::to_string))
+            {
+                Some(registered) => registered,
+                None => creabim_script::link::link_from_embedded(&project_dir, &entry, &script)
+                    .map(|(_, rel)| rel)
+                    .map_err(|e| e.to_string())?,
+            }
+        }
+    };
+    let tx = creabim_core::set_link_tx(doc.model(), id, &entry, &rel).map_err(|e| e.to_string())?;
+    doc.commit(tx).map_err(|e| e.to_string())?;
+    save_script_doc(&doc, &out)?;
+    println!("script {script_name:?} linked to {rel} as {entry:?}");
+    Ok(())
+}
+
+/// `script export`: write a block's source to a file (the embedded copy,
+/// which for a linked block is the same as the linked file kept in step).
+fn script_export(input: &str, name: &str, file: &str) -> Result<(), String> {
+    let model = load(input)?;
+    let (_, script_name, script) = find_script(&model, name)?;
+    std::fs::write(file, &script.source).map_err(|e| format!("{file}: {e}"))?;
+    println!("exported {script_name:?} to {file}");
+    Ok(())
+}
+
+/// `script embed`: drop the block's link (pruning the registry entry
+/// when no other block uses it); the current embedded source stays in
+/// the model and the file is left on disc untouched.
+fn script_embed(input: &str, name: &str, rest: &[&str]) -> Result<(), String> {
+    let mut out = input.to_string();
+    let mut it = rest.iter();
+    while let Some(flag) = it.next() {
+        match *flag {
+            "--out" => {
+                out = it
+                    .next()
+                    .ok_or_else(|| "--out needs a value".to_string())?
+                    .to_string()
+            }
+            other => return Err(format!("unknown flag {other:?}")),
+        }
+    }
+    let model = load(input)?;
+    let (id, script_name, _) = find_script(&model, name)?;
+    let mut doc = Document::from_model(model);
+    let tx = creabim_core::drop_link_tx(doc.model(), id).map_err(|e| e.to_string())?;
+    doc.commit(tx).map_err(|e| e.to_string())?;
+    save_script_doc(&doc, &out)?;
+    println!("script {script_name:?} embedded (link dropped)");
+    Ok(())
+}
+
+/// `script registry list`: show every registered disc module.
+fn script_registry_list(input: &str) -> Result<(), String> {
+    let model = load(input)?;
+    match creabim_core::registry_of(&model) {
+        Some((_, r)) if !r.links.is_empty() => {
+            for l in &r.links {
+                let users = model
+                    .iter()
+                    .filter(|e| {
+                        matches!(&e.kind, creabim_core::ElementKind::ScriptObject(s) if s.link.as_deref() == Some(&l.name))
+                    })
+                    .map(|e| e.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!(
+                    "{} -> {}{}",
+                    l.name,
+                    l.path,
+                    if users.is_empty() {
+                        " (unused)".to_string()
+                    } else {
+                        format!(" (used by {users})")
+                    }
+                );
+            }
+        }
+        _ => println!("no registered script modules"),
+    }
+    Ok(())
+}
+
+/// `script registry remove`: drop a registry entry outright. Blocks
+/// linked against it fall back to their embedded source.
+fn script_registry_remove(input: &str, name: &str, rest: &[&str]) -> Result<(), String> {
+    let mut out = input.to_string();
+    let mut it = rest.iter();
+    while let Some(flag) = it.next() {
+        match *flag {
+            "--out" => {
+                out = it
+                    .next()
+                    .ok_or_else(|| "--out needs a value".to_string())?
+                    .to_string()
+            }
+            other => return Err(format!("unknown flag {other:?}")),
+        }
+    }
+    let model = load(input)?;
+    let mut doc = Document::from_model(model);
+    let (id, mut registry) = creabim_core::registry_of(doc.model())
+        .ok_or_else(|| format!("no registry entry named {name:?}"))?;
+    if !registry.remove(name) {
+        return Err(format!("no registry entry named {name:?}"));
+    }
+    // Unpoint every block that named the removed entry; their embedded
+    // copies carry on. An emptied registry element goes too, so remove
+    // converges to no registry at all.
+    let mut tx = creabim_core::Transaction::new(format!("registry remove {name}"));
+    let before = doc.model().get(id).cloned().ok_or("registry vanished")?;
+    if registry.links.is_empty() {
+        tx = tx.remove_cascade(doc.model(), id);
+    } else {
+        let mut after = before.clone();
+        after.kind = creabim_core::ElementKind::ScriptRegistry(registry);
+        tx = tx.replace(before, after);
+    }
+    let linked: Vec<creabim_core::Element> = doc
+        .model()
+        .iter()
+        .filter(|e| {
+            matches!(&e.kind, creabim_core::ElementKind::ScriptObject(s) if s.link.as_deref() == Some(name))
+        })
+        .cloned()
+        .collect();
+    for before in linked {
+        let mut after = before.clone();
+        if let creabim_core::ElementKind::ScriptObject(s) = &mut after.kind {
+            s.link = None;
+        }
+        tx = tx.replace(before, after);
+    }
+    doc.commit(tx).map_err(|e| e.to_string())?;
+    save_script_doc(&doc, &out)?;
+    println!("registry entry {name:?} removed");
     Ok(())
 }
 

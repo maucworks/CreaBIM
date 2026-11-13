@@ -977,6 +977,11 @@ impl CreaBimApp {
             }
             if group == 2 {
                 items.push(Item::new("new.sheet", "Sheet").icon("file-text"));
+                items.push(
+                    Item::new("new.3dview", "3D view")
+                        .icon("cuboid")
+                        .hint("A saved 3D view to orbit: drag it round, place it on a sheet"),
+                );
                 items.push(Item::sub("Schedule", schedule_items()).icon("table-2"));
             }
         }
@@ -1594,6 +1599,7 @@ impl CreaBimApp {
             }
             "new.project" => self.open_new_project(ctx),
             "new.sheet" => self.new_sheet(),
+            "new.3dview" => self.new_3d_view(),
             "levels" => self.open_levels(),
             "project.info" => self.project_open = true,
             "level.add" => self.add_level_above(),

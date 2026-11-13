@@ -924,6 +924,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn new_3d_view_inserts_activates_and_names_uniquely() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        // the sample ships one 3D view; the new one takes the next name
+        app.run_action(&ctx, "new.3dview");
+        let views: Vec<String> = app
+            .doc
+            .model()
+            .iter()
+            .filter(|e| matches!(e.kind, ElementKind::View(_)))
+            .map(|e| e.name.clone())
+            .collect();
+        assert!(views.contains(&"3D View".to_string()), "{views:?}");
+        assert!(views.contains(&"3D View South-East".to_string()));
+        let active = app.active_view.and_then(|id| app.doc.model().get(id));
+        assert_eq!(active.map(|e| e.name.as_str()), Some("3D View"));
+        app.run_action(&ctx, "new.3dview");
+        let names: Vec<String> = app
+            .doc
+            .model()
+            .iter()
+            .filter(|e| matches!(e.kind, ElementKind::View(_)))
+            .map(|e| e.name.clone())
+            .collect();
+        assert!(names.contains(&"3D View 2".to_string()), "{names:?}");
+    }
+
+    #[test]
     fn after_an_export_the_status_bar_offers_its_folder() {
         let mut app = test_app();
         let dir = std::env::temp_dir().join(format!("creabim-export-{}", std::process::id()));

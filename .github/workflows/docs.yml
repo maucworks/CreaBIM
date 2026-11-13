@@ -1,0 +1,47 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: pdoc API reference
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install "pdoc>=15,<17"
+      - name: Build the creabim builder reference
+        # The package docstring is the landing page (protocol, registry,
+        # Route B); the full guide lives in docs/scripting-guide.md,
+        # read on GitHub next to the other hand-written docs.
+        run: |
+          PYTHONPATH=crates/creabim-script/python \
+            python -m pdoc --docformat google -o docs/_build creabim
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/_build
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

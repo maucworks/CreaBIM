@@ -509,6 +509,18 @@ impl CreaBimApp {
         self.frame_all();
     }
 
+    /// Keep the script runner's project directory in step with the
+    /// project file's location: `scripts/` lives next to it (M-S6).
+    /// A bare name means an unsaved project: no scripts dir yet.
+    fn set_script_dir(&mut self) {
+        let dir = if self.path.contains('/') {
+            creabim_script::link::project_dir_of(std::path::Path::new(&self.path))
+        } else {
+            None
+        };
+        self.scripts.set_project_dir(dir);
+    }
+
     /// Open a project file, or import and link any other file.
     fn open_path(&mut self, path: &str) {
         let lower = path.to_ascii_lowercase();
@@ -544,6 +556,7 @@ impl CreaBimApp {
                     self.watch = Default::default();
                     self.recent.add(path);
                     self.path = with_extension(path, "creabim");
+                    self.set_script_dir();
                     self.status = format!(
                         "Opened {} ({}): {n} elements{}. Save keeps it as {}.",
                         file_label(path),
@@ -575,6 +588,7 @@ impl CreaBimApp {
                 self.watch = Default::default();
                 self.recent.add(path);
                 self.path = path.to_string();
+                self.set_script_dir();
                 self.saved_revision = Some(self.doc.model().revision());
                 self.status = format!("Opened {path}");
                 // copies a Duplicate left on their originals (MU24)
@@ -606,6 +620,7 @@ impl CreaBimApp {
         }
         if !self.path.to_ascii_lowercase().ends_with(".creabim") {
             self.path = with_extension(&self.path, "creabim");
+            self.set_script_dir();
         }
         let r = creabim_store::save(&self.path, &self.doc);
         if r.is_ok() {
@@ -626,6 +641,7 @@ impl CreaBimApp {
         let start = with_extension(&self.path, "creabim");
         if let Some(path) = crate::files::pick_save(&start, "Save the project as", "creabim") {
             self.path = path;
+            self.set_script_dir();
             self.save();
         }
     }
@@ -6876,6 +6892,30 @@ impl CreaBimApp {
         );
     }
 
+    /// A saved 3D (axonometric) view of the model, opened for orbiting.
+    fn new_3d_view(&mut self) {
+        let used: Vec<String> = self
+            .doc
+            .model()
+            .iter()
+            .filter(|e| matches!(e.kind, ElementKind::View(_)))
+            .map(|e| e.name.clone())
+            .collect();
+        let name = std::iter::once("3D View".to_string())
+            .chain((2..).map(|n| format!("3D View {n}")))
+            .find(|n| !used.contains(n))
+            .expect("unbounded");
+        let e = Element::new(name, ElementKind::View(View::axonometric(35.0, 30.0)));
+        let id = e.id;
+        let r = self.doc.commit(Transaction::new("New 3D view").insert(e));
+        self.active_view = Some(id);
+        self.selection.only(id);
+        self.report(
+            r,
+            "New 3D view. Drag it to orbit; place it on a sheet with Place view….",
+        );
+    }
+
     fn new_schedule(&mut self, category: ScheduleCategory) {
         let label = category.label();
         let e = Element::new(
@@ -8735,6 +8775,18 @@ impl CreaBimApp {
             }
         };
         if self.prop_header(ui, "element", section, true, None) {
+            // Script outputs are locked (the commit guard enforces it):
+            // say who manages the element and skip the editors — any
+            // edit here would be overwritten on the next run.
+            if let Some((_, script)) = creabim_core::manager_of(self.doc.model(), id) {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Managed by script {script}: direct edits are locked. Change the script or its inputs; delete the block to keep this as an ordinary element."
+                    ))
+                    .weak(),
+                );
+                return;
+            }
             match &mut edited.kind {
                 ElementKind::Level(l) => {
                     if num(ui, "Elevation", &mut l.elevation, -100.0, 1000.0) {
@@ -9671,9 +9723,30 @@ impl CreaBimApp {
                 }
                 ElementKind::ScriptObject(s) => {
                     if let Some(l) =
-                        crate::scriptui::script_panel(ui, &mut self.scripts, &self.doc, id, s)
+                        crate::scriptui::script_panel(ui, &mut self.scripts, &mut self.doc, id, s)
                     {
                         label = l;
+                    }
+                }
+                ElementKind::ScriptRegistry(r) => {
+                    // The registry is managed here by removing entries
+                    // (blocks that named one fall back to embedded) and
+                    // in full with `script registry` on the CLI.
+                    let mut drop: Option<String> = None;
+                    for l in &r.links {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{} → {}", l.name, l.path));
+                            if ui.small_button("Remove").clicked() {
+                                drop = Some(l.name.clone());
+                            }
+                        });
+                    }
+                    if r.links.is_empty() {
+                        ui.label(egui::RichText::new("No disc modules registered.").weak());
+                    }
+                    if let Some(name) = drop {
+                        r.remove(&name);
+                        label = "Remove registry entry";
                     }
                 }
                 ElementKind::Reference(r) => {
@@ -11729,6 +11802,7 @@ pub(crate) fn kind_word(k: &ElementKind) -> &'static str {
         ElementKind::Site(s) if s.is_plant() => "plant",
         ElementKind::Site(_) => "site element",
         ElementKind::ScriptObject(_) => "script",
+        ElementKind::ScriptRegistry(_) => "script registry",
     }
 }
 

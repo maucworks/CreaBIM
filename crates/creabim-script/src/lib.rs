@@ -16,9 +16,13 @@
 //! with `DYLD_LIBRARY_PATH=<home>/lib` (macOS) on the test command
 //! so the loader finds the bundled libpython.
 
+pub mod api;
 pub mod engine;
 mod host;
+pub mod link;
 pub mod run;
+
+pub use api::ensure_api;
 
 pub use creabim_provision::{
     ensure as ensure_provisioned, ensure_packages, home_under, site_dir_for, ProvisionError,

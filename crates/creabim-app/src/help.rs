@@ -285,6 +285,7 @@ pub fn element_page(kind: &ElementKind) -> &'static str {
         ElementKind::Guide(_) => "guides",
         ElementKind::Material(_) => "materials",
         ElementKind::ScriptObject(_) => "scripts",
+        ElementKind::ScriptRegistry(_) => "scripts",
         ElementKind::Assembly(_) => "assemblies",
         ElementKind::ElementType(_) => "types",
         ElementKind::Shaft(_) => "holes#shafts",

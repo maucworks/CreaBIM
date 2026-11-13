@@ -99,8 +99,9 @@ pub use reference::{RefSource, Reference};
 pub use room::{Ceiling, Room, RoomField, Separator};
 pub use screen::ScreenPattern;
 pub use script::{
-    parse_front_matter, reconcile, ParamDecl, ParamInput, ParamKind, ParamValue, ScriptObject,
-    ScriptOutput,
+    drop_link_tx, entrance_path, manager_of, parse_front_matter, reconcile, registry_of,
+    remap_fresh_ids, set_link_tx, slug, ParamDecl, ParamInput, ParamKind, ParamValue, ScriptLink,
+    ScriptObject, ScriptOutput, ScriptRegistry,
 };
 pub use site::{PlantForm, Site, SiteForm};
 pub use sketch::{bulge_through, Circle, Curve, SegmentKind};
@@ -127,4 +128,6 @@ pub enum ModelError {
     StillReferenced { element: ElementId, by: ElementId },
     #[error("invalid element {0}: {1}")]
     Invalid(ElementId, String),
+    #[error("element {element} is managed by script {script:?}: change the script or its inputs, not the element")]
+    ManagedByScript { element: ElementId, script: String },
 }
