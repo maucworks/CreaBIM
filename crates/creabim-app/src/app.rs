@@ -1472,10 +1472,10 @@ impl CreaBimApp {
     /// Fit the 3D view round the whole model.
     fn frame_3d(&mut self) {
         // TEMP-DIAG: synchronous full-scene build on the UI thread.
-        eprintln!("[diag] 3d: frame_3d start");
+        creabim_core::diag!("[diag] 3d: frame_3d start");
         let t = std::time::Instant::now();
         let scene = (*creabim_geom::shared_scene(self.doc.model())).clone();
-        eprintln!(
+        creabim_core::diag!(
             "[diag] 3d: frame_3d scene ready in {:.0} ms",
             t.elapsed().as_secs_f64() * 1000.0
         );
@@ -2343,10 +2343,10 @@ impl CreaBimApp {
                 // TEMP-DIAG for the 3D-view beachball: sync builds block
                 // the UI thread; log before/after so a hang is located.
                 let rev = model.revision();
-                eprintln!("[diag] 3d: sync scene build start (rev {rev})");
+                creabim_core::diag!("[diag] 3d: sync scene build start (rev {rev})");
                 let t = std::time::Instant::now();
                 let s = creabim_geom::shared_scene(model);
-                eprintln!(
+                creabim_core::diag!(
                     "[diag] 3d: sync scene built in {:.0} ms",
                     t.elapsed().as_secs_f64() * 1000.0
                 );
@@ -9772,6 +9772,21 @@ impl CreaBimApp {
                         label = "Remove registry entry";
                     }
                 }
+                ElementKind::SiteFeature(s) => {
+                    // Loaded geography: read-only here, refreshed from
+                    // its GeoPackage with `site load`; category edits
+                    // happen there too, so a reload never fights them.
+                    ui.label(format!("Layer: {}", s.layer));
+                    ui.label(format!("Category: {:?}", s.category));
+                    ui.label(format!(
+                        "Features: {} ({:.0} m²)",
+                        s.features.len(),
+                        s.area()
+                    ));
+                    if let Some(src) = e.source.as_ref() {
+                        ui.label(egui::RichText::new(format!("Source: {}", src.file)).weak());
+                    }
+                }
                 ElementKind::Reference(r) => {
                     if let Some(l) = self.reference_fields(ui, id, r) {
                         label = l;
@@ -11826,6 +11841,7 @@ pub(crate) fn kind_word(k: &ElementKind) -> &'static str {
         ElementKind::Site(_) => "site element",
         ElementKind::ScriptObject(_) => "script",
         ElementKind::ScriptRegistry(_) => "script registry",
+        ElementKind::SiteFeature(_) => "site layer",
     }
 }
 

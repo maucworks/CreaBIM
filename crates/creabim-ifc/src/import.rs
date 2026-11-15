@@ -14,8 +14,9 @@ use crate::shape::{Geo, Warnings};
 use crate::step_read::{parse, Entity, StepError, StepFile, Value};
 use crate::tess::{area2, bounds, merge_coplanar, weld};
 use creabim_core::{
-    Document, EditMesh, Element, ElementId, ElementKind, FreeMesh, Grid, Hatch, Level,
-    LocationLine, Material, Model, Opening, OpeningKind, Slab, Transaction, Wall,
+    dms_to_decimal, Document, EditMesh, Element, ElementId, ElementKind, FreeMesh, GeoPlacement,
+    Grid, Hatch, Level, LocationLine, Material, Model, Opening, OpeningKind, ProjectInfo, Slab,
+    Transaction, Wall,
 };
 use glam::{DMat4, DVec2, DVec3};
 use std::collections::{HashMap, HashSet};
@@ -88,6 +89,12 @@ pub fn import_ifc(text: &str) -> Result<ImportResult, ImportError> {
     imp.run();
     let mut elements = std::mem::take(&mut imp.out);
     read_tags(&file, &mut elements);
+    if let Some(info) = read_placement(&file) {
+        elements.push(Element::new(
+            "Project information",
+            ElementKind::Project(info),
+        ));
+    }
     let mut warnings = std::mem::take(&mut imp.g.warnings);
     let model = build_model(elements, &mut warnings)?;
     let (warnings, details) = warnings.into_parts();
@@ -153,6 +160,85 @@ pub(crate) fn build_model(
     doc.commit(tx)
         .map_err(|e| ImportError::Model(e.to_string()))?;
     Ok(doc.model().clone())
+}
+
+/// The project's georeference from the file: `IfcMapConversion` (plus
+/// its `IfcProjectedCRS` name) onto a placement, `IfcSite`
+/// RefLatitude/RefLongitude onto lat/long, and the representation
+/// context's TrueNorth onto true_north. `None` when the file carries
+/// none of it — plain files gain no Project element.
+fn read_placement(f: &StepFile) -> Option<ProjectInfo> {
+    let mut info: Option<ProjectInfo> = None;
+    for e in f.entities.values() {
+        if e.class.as_str() == "IFCMAPCONVERSION" {
+            let get = |i: usize| e.arg(i).as_f64();
+            if let (Some(xa), Some(xo)) = (get(5), get(6)) {
+                let g = GeoPlacement::from_map_conversion(
+                    String::new(),
+                    get(2).unwrap_or(0.0),
+                    get(3).unwrap_or(0.0),
+                    get(4).unwrap_or(0.0),
+                    xa,
+                    xo,
+                );
+                let p = placed_info(&mut info);
+                p.easting = Some(g.easting);
+                p.northing = Some(g.northing);
+                p.true_north = g.rotation_deg;
+                p.elevation = g.height;
+            }
+            if let Some(crs) = e.arg(0).as_ref().and_then(|id| f.entities.get(&id)) {
+                if crs.class.as_str() == "IFCPROJECTEDCRS" {
+                    if let Some(name) = crs.arg(0).as_str() {
+                        placed_info(&mut info).srid = Some(name.to_string());
+                    }
+                }
+            }
+        }
+        if e.class.as_str() == "IFCSITE" {
+            let dms = |v: &Value| {
+                let n: Vec<f64> = v.as_list().iter().filter_map(Value::as_f64).collect();
+                if n.len() != 4 {
+                    return None;
+                }
+                Some(dms_to_decimal(
+                    n[0] as i32,
+                    n[1] as u32,
+                    n[2] as u32,
+                    n[3] as u32,
+                ))
+            };
+            if let Some(lat) = dms(e.arg(9)) {
+                placed_info(&mut info).latitude = Some(lat);
+            }
+            if let Some(lon) = dms(e.arg(10)) {
+                placed_info(&mut info).longitude = Some(lon);
+            }
+        }
+        if e.class.as_str() == "IFCGEOMETRICREPRESENTATIONCONTEXT" {
+            if let Some(dir) = e.arg(5).as_ref().and_then(|id| f.entities.get(&id)) {
+                if dir.class.as_str() == "IFCDIRECTION" {
+                    let n: Vec<f64> = dir
+                        .arg(0)
+                        .as_list()
+                        .iter()
+                        .filter_map(Value::as_f64)
+                        .collect();
+                    if n.len() >= 2 {
+                        placed_info(&mut info).true_north = (-n[0]).atan2(n[1]).to_degrees();
+                    }
+                }
+            }
+        }
+    }
+    info
+}
+
+fn placed_info(info: &mut Option<ProjectInfo>) -> &mut ProjectInfo {
+    info.get_or_insert_with(|| ProjectInfo {
+        name: String::new(),
+        ..Default::default()
+    })
 }
 
 /// Give elements the marks their IFC entities carry as their Tag (the

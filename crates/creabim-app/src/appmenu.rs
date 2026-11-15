@@ -850,6 +850,30 @@ impl CreaBimApp {
                 };
                 degrees(ui, "Latitude", &mut draft.latitude, 90.0);
                 degrees(ui, "Longitude", &mut draft.longitude, 180.0);
+                crate::props::row(ui, "CRS", |ui| {
+                    let mut on = draft.srid.is_some();
+                    if ui.checkbox(&mut on, "").changed() {
+                        draft.srid = on.then(|| "EPSG:28992".to_string());
+                    }
+                    if let Some(s) = &mut draft.srid {
+                        ui.text_edit_singleline(s);
+                    }
+                });
+                let metres = |ui: &mut egui::Ui, label: &str, v: &mut Option<f64>| {
+                    crate::props::row(ui, label, |ui| {
+                        let mut on = v.is_some();
+                        if ui.checkbox(&mut on, "").changed() {
+                            *v = on.then_some(0.0);
+                        }
+                        if let Some(m) = v {
+                            ui.add(
+                                egui::DragValue::new(m).speed(1.0).max_decimals(3).suffix(" m"),
+                            );
+                        }
+                    });
+                };
+                metres(ui, "Easting", &mut draft.easting);
+                metres(ui, "Northing", &mut draft.northing);
                 crate::props::row(ui, "Elevation", |ui| {
                     ui.add(
                         egui::DragValue::new(&mut draft.elevation)

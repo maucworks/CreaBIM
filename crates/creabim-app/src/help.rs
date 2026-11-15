@@ -278,6 +278,7 @@ pub fn element_page(kind: &ElementKind) -> &'static str {
         ElementKind::Part(p) if p.void => "parts#voids",
         ElementKind::Part(_) => "parts",
         ElementKind::Site(_) => "site",
+        ElementKind::SiteFeature(_) => "site",
         ElementKind::Level(_) => "levels",
         ElementKind::Grid(_) | ElementKind::GridGroup(_) => "grids",
         ElementKind::FreeMesh(_) | ElementKind::Cut(_) => "masses",

@@ -3,6 +3,7 @@
 //! sheets' title blocks (under any value a sheet sets itself) and names
 //! the project, site and building in IFC exports (A7-5).
 
+use glam::DVec2;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -30,6 +31,16 @@ pub struct ProjectInfo {
     pub elevation: f64,
     /// How far true north turns from the drawings' up, degrees anticlockwise.
     pub true_north: f64,
+    /// The CRS the easting/northing below are in, e.g. `"EPSG:28992"`
+    /// (RD New). Absent: the project is not placed on the map.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub srid: Option<String>,
+    /// Easting of the model origin (0,0) in `srid` metres.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub easting: Option<f64>,
+    /// Northing of the model origin (0,0) in `srid` metres.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub northing: Option<f64>,
     pub building_name: String,
     /// "Dwelling", "Office", "School".
     pub building_use: String,
@@ -181,6 +192,115 @@ impl ProjectInfo {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }
+
+    /// The project's georeference, when srid + easting + northing are
+    /// all set: where the model origin (0,0) sits on the map, which way
+    /// is north, and how high project zero is. This is the common
+    /// understanding a linked GeoPackage and the model share: the file
+    /// stays in its source CRS, features are projected into local
+    /// metres once, at load time, through [`GeoPlacement::world_of`].
+    pub fn placement(&self) -> Option<GeoPlacement> {
+        Some(GeoPlacement {
+            srid: self.srid.clone()?,
+            easting: self.easting?,
+            northing: self.northing?,
+            rotation_deg: self.true_north,
+            height: self.elevation,
+        })
+    }
+}
+
+/// Where a project sits on the map: the CRS, the model origin in it,
+/// the turn from model-up to grid north, and the height of project
+/// zero above sea level. One rigid transform for the whole project
+/// (standard BIM practice).
+///
+/// Convention: `rotation_deg` turns model-up towards grid north,
+/// anticlockwise in degrees — the same `true_north` the drawings use.
+/// The model +X axis then points at `(cos r, -sin r)` in world metres,
+/// which is exactly `IfcMapConversion`'s XAxisAbscissa/Ordinate; its
+/// Eastings/Northings/OrthogonalHeight are easting/northing/height.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GeoPlacement {
+    pub srid: String,
+    pub easting: f64,
+    pub northing: f64,
+    pub rotation_deg: f64,
+    pub height: f64,
+}
+
+impl GeoPlacement {
+    /// Model metres to map metres.
+    pub fn world_of(&self, model: DVec2) -> DVec2 {
+        let t = self.rotation_deg.to_radians();
+        let (c, s) = (t.cos(), t.sin());
+        DVec2::new(
+            self.easting + model.x * c + model.y * s,
+            self.northing - model.x * s + model.y * c,
+        )
+    }
+
+    /// Map metres back to model metres (the inverse transform).
+    pub fn model_of(&self, world: DVec2) -> DVec2 {
+        let t = self.rotation_deg.to_radians();
+        let (c, s) = (t.cos(), t.sin());
+        let (dx, dy) = (world.x - self.easting, world.y - self.northing);
+        DVec2::new(dx * c - dy * s, dx * s + dy * c)
+    }
+
+    /// `(eastings, northings, height, x_abscissa, x_ordinate)` for
+    /// `IfcMapConversion` (scale is always 1: both sides are metres).
+    pub fn to_map_conversion(&self) -> (f64, f64, f64, f64, f64) {
+        let t = self.rotation_deg.to_radians();
+        (self.easting, self.northing, self.height, t.cos(), -t.sin())
+    }
+
+    /// The inverse: rotation recovered from the model-X direction.
+    pub fn from_map_conversion(
+        srid: String,
+        eastings: f64,
+        northings: f64,
+        height: f64,
+        x_abscissa: f64,
+        x_ordinate: f64,
+    ) -> Self {
+        Self {
+            srid,
+            easting: eastings,
+            northing: northings,
+            // +0.0 normalises a -0.0 sweep to plain zero for display.
+            rotation_deg: (-x_ordinate).atan2(x_abscissa).to_degrees() + 0.0,
+            height,
+        }
+    }
+
+    /// True north as a 2D direction in model coordinates, for
+    /// `IfcGeometricRepresentationContext.TrueNorth`.
+    pub fn true_north_dir(&self) -> DVec2 {
+        let t = self.rotation_deg.to_radians();
+        DVec2::new(-t.sin(), t.cos())
+    }
+}
+
+/// Decimal degrees to IFC's (degrees, minutes, seconds, millionths):
+/// the sign rides on the degrees, the rest stays non-negative.
+pub fn decimal_to_dms(decimal: f64) -> (i32, u32, u32, u32) {
+    let total = (decimal.abs() * 3_600_000_000.0).round() as i64;
+    let deg = (total / 3_600_000_000) as i32 * decimal.signum() as i32;
+    let rest = (total % 3_600_000_000) as u64;
+    let min = (rest / 60_000_000) as u32;
+    let sec = ((rest % 60_000_000) / 1_000_000) as u32;
+    let millionths = (rest % 1_000_000) as u32;
+    (deg, min, sec, millionths)
+}
+
+/// Back: IFC's compound angle to decimal degrees.
+pub fn dms_to_decimal(deg: i32, min: u32, sec: u32, millionths: u32) -> f64 {
+    let sign = if deg < 0 { -1.0 } else { 1.0 };
+    sign * (deg.abs() as f64
+        + min as f64 / 60.0
+        + sec as f64 / 3600.0
+        + millionths as f64 / 3_600_000_000.0)
 }
 
 /// The change that makes `info` the project's information: one undo
@@ -262,5 +382,81 @@ mod tests {
                 .ops
                 .is_empty()
         );
+    }
+
+    fn placed() -> ProjectInfo {
+        ProjectInfo {
+            srid: Some("EPSG:28992".into()),
+            // Domtoren, Utrecht, in RD metres.
+            easting: Some(136331.0),
+            northing: Some(455986.0),
+            true_north: 0.0,
+            elevation: 1.5,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn placement_needs_srid_easting_and_northing() {
+        assert!(placed().placement().is_some());
+        assert!(ProjectInfo::default().placement().is_none());
+        let mut p = placed();
+        p.northing = None;
+        assert!(p.placement().is_none());
+    }
+
+    #[test]
+    fn world_of_is_origin_plus_rotated_metres() {
+        let g = placed().placement().unwrap();
+        let o = g.world_of(glam::DVec2::ZERO);
+        assert_eq!((o.x, o.y), (136331.0, 455986.0));
+        let p = g.world_of(glam::DVec2::new(10.0, 0.0));
+        assert_eq!((p.x, p.y), (136341.0, 455986.0));
+        // 90° anticlockwise: model +X points south, +Y points east.
+        let mut p = placed();
+        p.true_north = 90.0;
+        let g = p.placement().unwrap();
+        let x = g.world_of(glam::DVec2::new(1.0, 0.0));
+        assert!((x.x - 136331.0).abs() < 1e-9 && (x.y - 455985.0).abs() < 1e-9);
+        let y = g.world_of(glam::DVec2::new(0.0, 1.0));
+        assert!((y.x - 136332.0).abs() < 1e-9 && (y.y - 455986.0).abs() < 1e-9);
+        // Round trip, all quadrants.
+        for (mx, my) in [(-3.0, 4.0), (12.5, -7.25), (0.0, 0.0)] {
+            let m = glam::DVec2::new(mx, my);
+            let back = g.model_of(g.world_of(m));
+            assert!((back - m).length() < 1e-9, "{m:?}");
+        }
+    }
+
+    #[test]
+    fn map_conversion_round_trips_through_model_x() {
+        let g = placed().placement().unwrap();
+        let (e, n, h, xa, xo) = g.to_map_conversion();
+        assert_eq!((e, n, h), (136331.0, 455986.0, 1.5));
+        assert!((xa - 1.0).abs() < 1e-12 && xo.abs() < 1e-12);
+        let back = GeoPlacement::from_map_conversion("EPSG:28992".into(), e, n, h, xa, xo);
+        assert!((back.rotation_deg - 0.0).abs() < 1e-9);
+        assert_eq!((back.easting, back.northing, back.height), (e, n, h));
+        // A 30° turn survives the axis round trip.
+        let mut p = placed();
+        p.true_north = 30.0;
+        let g = p.placement().unwrap();
+        let (_, _, _, xa, xo) = g.to_map_conversion();
+        let back = GeoPlacement::from_map_conversion("EPSG:28992".into(), e, n, h, xa, xo);
+        assert!((back.rotation_deg - 30.0).abs() < 1e-9);
+        assert!((g.true_north_dir() - glam::DVec2::new(-0.5, 0.8660254)).length() < 1e-6);
+    }
+
+    #[test]
+    fn dms_round_trips_dutch_coordinates() {
+        assert_eq!(decimal_to_dms(52.0907), (52, 5, 26, 520000));
+        assert_eq!(decimal_to_dms(5.1214), (5, 7, 17, 40000));
+        for d in [52.0907, 5.1214, 0.0, -33.865143] {
+            let (deg, min, sec, micro) = decimal_to_dms(d);
+            assert!(
+                (dms_to_decimal(deg, min, sec, micro) - d).abs() < 1e-7,
+                "{d}"
+            );
+        }
     }
 }

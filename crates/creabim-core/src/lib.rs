@@ -61,6 +61,24 @@ pub mod units;
 pub mod visibility;
 pub mod walls;
 
+/// Info-level diagnostics: loud only with `CREABIM_DIAG` set, for
+/// deliberate runs. Errors and warnings always print; a plain
+/// `make run` stays quiet. Same pattern as the app's `CREABIM_PERF`.
+pub fn diag_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CREABIM_DIAG").is_some())
+}
+
+/// `eprintln!` that only fires with `CREABIM_DIAG` set.
+#[macro_export]
+macro_rules! diag {
+    ($($arg:tt)*) => {
+        if $crate::diag_enabled() {
+            eprintln!($($arg)*)
+        }
+    };
+}
+
 pub use annotation::{
     text_style, DimAxis, DimensionKind, Font, Note, StyleUse, TagShape, Terminator, TextAlign,
     TextStyle,
@@ -94,7 +112,7 @@ pub use objects::{CatalogueObject, Object, ObjectCategory, ObjectType};
 pub use ops::{Op, Transaction};
 pub use papermark::{PaperMark, PaperMarkKind};
 pub use parts::Part;
-pub use project::{set_project, ProjectInfo};
+pub use project::{decimal_to_dms, dms_to_decimal, set_project, GeoPlacement, ProjectInfo};
 pub use reference::{RefSource, Reference};
 pub use room::{Ceiling, Room, RoomField, Separator};
 pub use screen::ScreenPattern;
@@ -103,7 +121,7 @@ pub use script::{
     remap_fresh_ids, set_link_tx, slug, ParamDecl, ParamInput, ParamKind, ParamValue, ScriptLink,
     ScriptObject, ScriptOutput, ScriptRegistry,
 };
-pub use site::{PlantForm, Site, SiteForm};
+pub use site::{PlantForm, Site, SiteCategory, SiteFeature, SiteForm, SiteGeometry, SiteRow};
 pub use sketch::{bulge_through, Circle, Curve, SegmentKind};
 pub use slab::{room_outline, slab_from_sketch, Shaft};
 pub use titleblock::SheetTemplate;
@@ -130,4 +148,6 @@ pub enum ModelError {
     Invalid(ElementId, String),
     #[error("element {element} is managed by script {script:?}: change the script or its inputs, not the element")]
     ManagedByScript { element: ElementId, script: String },
+    #[error("element {element} is a linked site layer ({file}): move the whole package from the site editor, not the layer")]
+    ManagedBySite { element: ElementId, file: String },
 }

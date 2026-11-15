@@ -166,6 +166,16 @@ pub fn transformed(model: &Model, e: &Element, t: &Xform) -> Option<Element> {
             }
             _ => return None,
         },
+        // site geography moves and turns with the model; scaling map
+        // data makes no sense, like a grid
+        ElementKind::SiteFeature(s) => match t {
+            Xform::Move(_) | Xform::Rotate { .. } => {
+                for f in &mut s.features {
+                    f.geom.map(|p| t.point2(p));
+                }
+            }
+            _ => return None,
+        },
         // a paper mark only moves across its sheet
         ElementKind::PaperMark(m) => match t {
             Xform::Move(d) => m.at += d.truncate(),

@@ -231,9 +231,21 @@ pub fn export_ifc4(model: &Model, opts: &ExportOptions) -> String {
     let x_axis = w.add("IFCDIRECTION", "(1.,0.,0.)");
     let origin = w.add("IFCCARTESIANPOINT", "(0.,0.,0.)");
     let wcs = w.add("IFCAXIS2PLACEMENT3D", format!("{origin},$,$"));
+    // True north rides the representation context — but only when the
+    // project actually turns it, so unplaced models byte-match history.
+    let north = model
+        .project_info()
+        .map(|(_, p)| p.true_north)
+        .filter(|t| *t != 0.0)
+        .map(|t| {
+            let r = t.to_radians();
+            w.add("IFCDIRECTION", real(-r.sin()) + "," + &real(r.cos()))
+        })
+        .map(|d| format!("({d})"))
+        .unwrap_or_else(|| "$".into());
     let model_ctx = w.add(
         "IFCGEOMETRICREPRESENTATIONCONTEXT",
-        format!("$,'Model',3,1.E-05,{wcs},$"),
+        format!("$,'Model',3,1.E-05,{wcs},{north}"),
     );
     let body = w.add(
         "IFCGEOMETRICREPRESENTATIONSUBCONTEXT",
@@ -247,6 +259,35 @@ pub fn export_ifc4(model: &Model, opts: &ExportOptions) -> String {
         "IFCGEOMETRICREPRESENTATIONSUBCONTEXT",
         format!("'FootPrint','Model',*,*,*,*,{model_ctx},$,.PLAN_VIEW.,$"),
     );
+    // The project's georeference, when placed: the CRS the easting/
+    // northing are in, and the map conversion putting the model origin
+    // on it. Unplaced models emit neither, as before. (Registered as a
+    // side effect; found back through the representation context.)
+    if let Some(g) = model.project_info().and_then(|(_, p)| p.placement()) {
+        // RD New's datum/projection are known; other CRSs travel as a
+        // bare name until their details are modelled.
+        let (datum, projection) = if g.srid == "EPSG:28992" {
+            ("'Amersfoort'", "'Oblique Stereographic'")
+        } else {
+            ("$", "$")
+        };
+        let crs = w.add(
+            "IFCPROJECTEDCRS",
+            format!("{},$,{datum},$,{projection},$", string(&g.srid)),
+        );
+        let (e, n, h, xa, xo) = g.to_map_conversion();
+        w.add(
+            "IFCMAPCONVERSION",
+            format!(
+                "{crs},{model_ctx},{},{},{},{},{},1.",
+                real(e),
+                real(n),
+                real(h),
+                real(xa),
+                real(xo)
+            ),
+        );
+    }
     let mut c = Ctx {
         w,
         body,
@@ -275,10 +316,25 @@ pub fn export_ifc4(model: &Model, opts: &ExportOptions) -> String {
     );
 
     let site_pl = c.local_placement(None, DVec3::ZERO, None);
+    // Degrees-minutes-seconds for the site's lat/long, when known;
+    // IFC carries north/east positive, like the model.
+    let dms = |d: f64| {
+        let (deg, min, sec, micro) = creabim_core::decimal_to_dms(d);
+        format!("({deg},{min},{sec},{micro})")
+    };
+    let (latitude, longitude) = model
+        .project_info()
+        .map(|(_, p)| {
+            (
+                p.latitude.map(&dms).unwrap_or_else(|| "$".into()),
+                p.longitude.map(&dms).unwrap_or_else(|| "$".into()),
+            )
+        })
+        .unwrap_or_else(|| ("$".into(), "$".into()));
     let site = c.w.add(
         "IFCSITE",
         format!(
-            "{},$,{},$,$,{site_pl},$,$,.ELEMENT.,$,$,$,$,$",
+            "{},$,{},$,$,{site_pl},$,$,.ELEMENT.,{latitude},{longitude},$,$,$",
             c.guid(),
             string(&opts.site_name)
         ),

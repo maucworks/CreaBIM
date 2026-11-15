@@ -116,7 +116,8 @@ impl Element {
             | ElementKind::Project(_)
             | ElementKind::MarkRules(_)
             | ElementKind::StylePack(_)
-            | ElementKind::ScriptRegistry(_) => vec![],
+            | ElementKind::ScriptRegistry(_)
+            | ElementKind::SiteFeature(_) => vec![],
             // types are soft too: an element whose type is gone keeps its values
             ElementKind::ElementType(_) => vec![],
             // a shaft's top level is soft: without it the shaft stops at
@@ -183,6 +184,7 @@ impl Element {
             ElementKind::Dimension(_) => "Dimension",
             ElementKind::ScriptObject(_) => "Script",
             ElementKind::ScriptRegistry(_) => "ScriptRegistry",
+            ElementKind::SiteFeature(_) => "SiteFeature",
             ElementKind::Tag(_) => "Tag",
             ElementKind::Note(_) => "Note",
             ElementKind::TextStyle(_) => "TextStyle",
@@ -389,6 +391,7 @@ impl Element {
             ElementKind::Footing(f) => f.validate(),
             ElementKind::Part(p) => p.validate(),
             ElementKind::Site(s) => s.validate(),
+            ElementKind::SiteFeature(s) => s.validate(),
             ElementKind::Room(r) => r.validate(),
             ElementKind::RoomSeparator(s) => s.validate(),
             ElementKind::Ceiling(c) => c.validate(),
@@ -504,6 +507,9 @@ pub enum ElementKind {
     /// The script registry: the project's link table between script
     /// blocks and disc modules. One per model; blocks name an entry.
     ScriptRegistry(crate::script::ScriptRegistry),
+    /// Loaded map geography: one source layer's polygons and polylines,
+    /// features keyed by source row-id. Drawn, never meshed.
+    SiteFeature(crate::site::SiteFeature),
 }
 
 impl ElementKind {
@@ -523,6 +529,7 @@ impl ElementKind {
             ElementKind::Dimension(_) => "Dimension",
             ElementKind::ScriptObject(_) => "Script",
             ElementKind::ScriptRegistry(_) => "ScriptRegistry",
+            ElementKind::SiteFeature(_) => "SiteFeature",
             ElementKind::Tag(_) => "Tag",
             ElementKind::Sketch(_) => "Sketch",
             ElementKind::Cut(_) => "Cut",

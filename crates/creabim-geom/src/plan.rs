@@ -963,6 +963,8 @@ pub fn plan_view_with(
         let on_level = match &e.kind {
             ElementKind::Wall(w) => w.level == level,
             ElementKind::Slab(s) => s.level == level,
+            // site geography has no level: it draws on every plan.
+            ElementKind::SiteFeature(_) => true,
             // an imported mesh with no level of its own is on the level its
             // base stands on (MU33: a Blender import showed in no plan)
             ElementKind::FreeMesh(f) => match f.level {
@@ -985,7 +987,11 @@ pub fn plan_view_with(
             k => creabim_core::members::level_of(k) == Some(level),
         };
         if on_level && (targets.contains(&e.id) || matches!(e.kind, ElementKind::FreeMesh(_))) {
-            sliced.push(e.id);
+            // Cuts don't apply to map layers: they have no body to cut,
+            // and the plan draws their vectors directly.
+            if !matches!(e.kind, ElementKind::SiteFeature(_)) {
+                sliced.push(e.id);
+            }
             if !matches!(e.kind, ElementKind::Wall(_)) {
                 continue;
             }
@@ -1333,6 +1339,46 @@ pub fn plan_view_with(
             }
             ElementKind::Sketch(sk) if sk.level == Some(level) => {
                 items.extend(sketch_items(e.id, sk, &|p| p));
+            }
+            // loaded map layers draw on every plan: filled polygons in
+            // the category's hatch, outlines over them, polylines as
+            // light projection lines. V1 has no cut/range test — site
+            // geometry is flat at project zero.
+            ElementKind::SiteFeature(s) => {
+                for f in &s.features {
+                    match &f.geom {
+                        creabim_core::SiteGeometry::Polygon { exterior, holes } => {
+                            items.push(PlanItem::Fill {
+                                id: e.id,
+                                points: exterior.clone(),
+                                hatch: s.category.hatch(),
+                                rgb: None,
+                            });
+                            items.push(PlanItem::Polygon {
+                                id: e.id,
+                                pen: Pen::Projection,
+                                points: exterior.clone(),
+                            });
+                            for h in holes {
+                                items.push(PlanItem::Polygon {
+                                    id: e.id,
+                                    pen: Pen::Projection,
+                                    points: h.clone(),
+                                });
+                            }
+                        }
+                        creabim_core::SiteGeometry::Polyline { points } => {
+                            for w in points.windows(2) {
+                                items.push(PlanItem::Line {
+                                    id: e.id,
+                                    pen: Pen::Projection,
+                                    a: w[0],
+                                    b: w[1],
+                                });
+                            }
+                        }
+                    }
+                }
             }
             // guides lying flat; one standing on a wall face shows in sections
             ElementKind::Guide(g)

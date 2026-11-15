@@ -1,4 +1,4 @@
-use crate::{Element, ElementId, Model, ModelError, Transaction};
+use crate::{Element, ElementId, ElementKind, Model, ModelError, Transaction};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Identity of one undo step's content. A new id is issued whenever a step is
@@ -125,6 +125,30 @@ impl Document {
                         return Err(ModelError::ManagedByScript {
                             element: after.id,
                             script,
+                        });
+                    }
+                }
+            }
+        }
+        // Linked site layers are locked the same way, as one package:
+        // dragging one layer in a view would silently desync it from
+        // its GeoPackage, so only the site editor's transactions
+        // (labelled `site …`) may rewrite them. Removes stay allowed
+        // (a reload re-creates a known layer).
+        if !tx.label.starts_with("site ") {
+            for op in &tx.ops {
+                if let crate::Op::Replace { after, .. } = op {
+                    if let Some(ElementKind::SiteFeature(_)) =
+                        self.model.get(after.id).map(|e| &e.kind)
+                    {
+                        let file = self
+                            .model()
+                            .get(after.id)
+                            .and_then(|e| e.source.as_ref().map(|s| s.file.clone()))
+                            .unwrap_or_default();
+                        return Err(ModelError::ManagedBySite {
+                            element: after.id,
+                            file,
                         });
                     }
                 }

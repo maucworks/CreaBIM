@@ -289,11 +289,11 @@ impl ScriptRunner {
                     if timed_out {
                         entry.status = Status::TimedOut;
                         crate::actlog::line(format!("script {run_name}: timed out"));
-                        eprintln!("[diag] script {run_name}: timed out");
+                        creabim_core::diag!("[diag] script {run_name}: timed out");
                     } else if cancel_asked {
                         entry.status = Status::Cancelled;
                         crate::actlog::line(format!("script {run_name}: cancelled"));
-                        eprintln!("[diag] script {run_name}: cancelled");
+                        creabim_core::diag!("[diag] script {run_name}: cancelled");
                     } else {
                         changed |= self.commit(doc, done.script_id, done.key, fresh, done.ms);
                     }
@@ -303,15 +303,15 @@ impl ScriptRunner {
                     if timed_out {
                         entry.status = Status::TimedOut;
                         crate::actlog::line(format!("script {run_name}: timed out"));
-                        eprintln!("[diag] script {run_name}: timed out");
+                        creabim_core::diag!("[diag] script {run_name}: timed out");
                     } else if cancel_asked {
                         entry.status = Status::Cancelled;
                         crate::actlog::line(format!("script {run_name}: cancelled"));
-                        eprintln!("[diag] script {run_name}: cancelled");
+                        creabim_core::diag!("[diag] script {run_name}: cancelled");
                     } else {
                         entry.status = Status::Failed { traceback };
                         crate::actlog::line(format!("script {run_name}: failed"));
-                        eprintln!("[diag] script {run_name}: failed");
+                        creabim_core::diag!("[diag] script {run_name}: failed");
                     }
                 }
             }
@@ -387,14 +387,16 @@ impl ScriptRunner {
                 crate::actlog::line(format!(
                     "script {name}: ok in {ms} ms (+{added} ~{replaced} -{removed})"
                 ));
-                eprintln!("[diag] script {name}: ok in {ms} ms (+{added} ~{replaced} -{removed})");
+                creabim_core::diag!(
+                    "[diag] script {name}: ok in {ms} ms (+{added} ~{replaced} -{removed})"
+                );
             }
             Err(e) => {
                 entry.status = Status::Failed {
                     traceback: format!("commit failed: {e}"),
                 };
                 crate::actlog::line(format!("script {name}: commit failed"));
-                eprintln!("[diag] script {name}: commit failed");
+                creabim_core::diag!("[diag] script {name}: commit failed");
             }
         }
         true
@@ -561,7 +563,7 @@ impl ScriptRunner {
             .unwrap_or_default();
         crate::actlog::line(format!("script {name}: recompute started"));
         // TEMP-DIAG: mirror to stderr so a frozen UI still leaves a trace.
-        eprintln!("[diag] script {name}: recompute started");
+        creabim_core::diag!("[diag] script {name}: recompute started");
         let snapshot = Arc::new(doc.model().clone());
         let tid = Arc::new(AtomicU64::new(0));
         let worker = tid.clone();

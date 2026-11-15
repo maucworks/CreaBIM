@@ -66,6 +66,14 @@ usage: (<model> is a .creabim project or a legacy .creabim.json file)
                                        each as a .json file to start one from
   creabim schedule <model> <doors|windows|walls|slabs|rooms> [out.csv]
                                        print or save a schedule as CSV
+  creabim site layers <file.gpkg>     list the GeoPackage's vector layers
+                                       with row counts and geometry kinds
+  creabim site load <model> <file.gpkg> [--out <model>]
+                                       link the GeoPackage's 2D vector
+                                       layers into the model as SiteFeature
+                                       elements (one per layer, features
+                                       keyed by source row), projected to
+                                       local metres; re-runs sync by key
   creabim script list <model>          list the model's script blocks
   creabim script run <model> <name|id> [--out <model>] [--param k=v ...]
                                        run a script block, committing its
@@ -100,6 +108,16 @@ usage: (<model> is a .creabim project or a legacy .creabim.json file)
   creabim script registry remove <model> <entry> [--out <model>]
                                        drop a registry entry; linked
                                        blocks fall back to embedded
+  creabim project show <model>       show the project information and,
+                                       when placed, the georeference
+  creabim project place <model> --srid <srid> --easting <x> --northing <y>
+                                       [--rotation <deg>] [--elevation <m>]
+                                       [--lat <deg>] [--lon <deg>]
+                                       [--out <model>]
+                                       place the model origin on the map
+                                       (model metres to CRS metres);
+                                       rotation turns model-up to grid
+                                       north, anticlockwise
   creabim stats <model>                count elements by IFC class
   creabim check <model>                list objects standing in doorways or in
                                        a door's swing, and wall layers moved
@@ -448,6 +466,10 @@ fn main() -> ExitCode {
         ["script", "registry", "remove", input, name, rest @ ..] => {
             script_registry_remove(input, name, rest)
         }
+        ["site", "layers", file] => site_layers(file),
+        ["site", "load", input, file, rest @ ..] => site_load(input, file, rest),
+        ["project", "show", input] => project_show(input),
+        ["project", "place", input, rest @ ..] => project_place(input, rest),
         ["ifcx", input, out] => load(input)
             .and_then(|m| std::fs::write(out, export_ifcx(&m)).map_err(|e| e.to_string())),
         ["import-ifcx", input, out] => read_text(input)
@@ -922,6 +944,79 @@ fn script_registry_list(input: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `site layers`: list a GeoPackage's vector layers with row counts
+/// and geometry kinds, marking what `site load` would ingest.
+fn site_layers(file: &str) -> Result<(), String> {
+    let layers = creabim_exchange::gpkg::layers(file)?;
+    if layers.is_empty() {
+        println!("no vector layers in {file}");
+        return Ok(());
+    }
+    for l in layers {
+        println!(
+            "{} [{}] srs={} rows={}{}",
+            l.name,
+            l.geom_type,
+            l.srs,
+            l.count,
+            if l.loadable {
+                ""
+            } else {
+                " (skipped: not a 2D polygon or polyline)"
+            }
+        );
+    }
+    Ok(())
+}
+
+/// `site load`: link a GeoPackage's 2D vector layers into the model as
+/// one SiteFeature element per layer, projected to local metres. Needs
+/// a placed project (`project place`); re-runs sync by source row-id.
+fn site_load(input: &str, file: &str, rest: &[&str]) -> Result<(), String> {
+    let mut out = input.to_string();
+    let mut it = rest.iter();
+    while let Some(flag) = it.next() {
+        match *flag {
+            "--out" => {
+                out = it
+                    .next()
+                    .ok_or_else(|| "--out needs a value".to_string())?
+                    .to_string()
+            }
+            other => return Err(format!("unknown flag {other:?}")),
+        }
+    }
+    let model = load(input)?;
+    let placement = model
+        .project_info()
+        .and_then(|(_, p)| p.placement())
+        .ok_or_else(|| "the project is not placed (project place first)".to_string())?;
+    let mut doc = Document::from_model(model);
+    let (tx, report) = creabim_exchange::site::sync_site(doc.model(), file, &placement)
+        .map_err(|e| e.to_string())?;
+    let (added, updated, removed, unchanged) = (
+        report.added,
+        report.updated,
+        report.removed,
+        report.unchanged,
+    );
+    doc.commit(tx).map_err(|e| e.to_string())?;
+    save_script_doc(&doc, &out)?;
+    println!(
+        "site {file}: {added} added, {updated} updated, {removed} removed, {unchanged} unchanged"
+    );
+    for skipped in &report.skipped_layers {
+        println!("  skipped layer: {skipped}");
+    }
+    if report.skipped_features > 0 {
+        println!("  skipped {} point/empty rows", report.skipped_features);
+    }
+    for note in report.notes.iter().take(5) {
+        println!("  note: {note}");
+    }
+    Ok(())
+}
+
 /// `script registry remove`: drop a registry entry outright. Blocks
 /// linked against it fall back to their embedded source.
 fn script_registry_remove(input: &str, name: &str, rest: &[&str]) -> Result<(), String> {
@@ -975,6 +1070,128 @@ fn script_registry_remove(input: &str, name: &str, rest: &[&str]) -> Result<(), 
     doc.commit(tx).map_err(|e| e.to_string())?;
     save_script_doc(&doc, &out)?;
     println!("registry entry {name:?} removed");
+    Ok(())
+}
+
+/// `project show`: project information and, when placed, the map
+/// origin in world metres plus the model↔world convention.
+fn project_show(input: &str) -> Result<(), String> {
+    let model = load(input)?;
+    let Some((_, p)) = model.project_info() else {
+        println!("no project information (project place to add it)");
+        return Ok(());
+    };
+    for (k, v) in p.fields() {
+        println!("{k}: {v}");
+    }
+    if let Some(g) = p.placement() {
+        println!("srid: {}", g.srid);
+        println!("easting: {}", g.easting);
+        println!("northing: {}", g.northing);
+        println!(
+            "rotation: {} deg anticlockwise (model-up to grid north)",
+            g.rotation_deg
+        );
+        println!("height: {} m above sea level", g.height);
+        if let (Some(lat), Some(lon)) = (p.latitude, p.longitude) {
+            println!("lat/long: {lat}, {lon}");
+        }
+        let o = g.world_of(glam::DVec2::ZERO);
+        println!("model (0,0) is world ({}, {})", o.x, o.y);
+    } else {
+        println!("not placed on the map (project place to place it)");
+    }
+    Ok(())
+}
+
+/// `project place`: set the georeference — the CRS and the model
+/// origin in it. Rotation turns model-up to grid north,
+/// anticlockwise in degrees.
+fn project_place(input: &str, rest: &[&str]) -> Result<(), String> {
+    let mut out = input.to_string();
+    let (mut srid, mut easting, mut northing) = (None, None, None);
+    let (mut rotation, mut elevation, mut lat, mut lon) = (None, None, None, None);
+    let mut it = rest.iter();
+    while let Some(flag) = it.next() {
+        let value = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
+        match *flag {
+            "--out" => out = value.to_string(),
+            "--srid" => srid = Some(value.to_string()),
+            "--easting" => {
+                easting = Some(
+                    value
+                        .parse::<f64>()
+                        .map_err(|_| format!("{value:?} is not a number"))?,
+                )
+            }
+            "--northing" => {
+                northing = Some(
+                    value
+                        .parse::<f64>()
+                        .map_err(|_| format!("{value:?} is not a number"))?,
+                )
+            }
+            "--rotation" => {
+                rotation = Some(
+                    value
+                        .parse::<f64>()
+                        .map_err(|_| format!("{value:?} is not a number"))?,
+                )
+            }
+            "--elevation" => {
+                elevation = Some(
+                    value
+                        .parse::<f64>()
+                        .map_err(|_| format!("{value:?} is not a number"))?,
+                )
+            }
+            "--lat" => {
+                lat = Some(
+                    value
+                        .parse::<f64>()
+                        .map_err(|_| format!("{value:?} is not a number"))?,
+                )
+            }
+            "--lon" => {
+                lon = Some(
+                    value
+                        .parse::<f64>()
+                        .map_err(|_| format!("{value:?} is not a number"))?,
+                )
+            }
+            other => return Err(format!("unknown flag {other:?}")),
+        }
+    }
+    let (srid, easting, northing) = match (srid, easting, northing) {
+        (Some(s), Some(e), Some(n)) => (s, e, n),
+        _ => return Err("--srid, --easting and --northing are all required".to_string()),
+    };
+    let model = load(input)?;
+    let mut doc = Document::from_model(model);
+    let mut info = doc
+        .model()
+        .project_info()
+        .map(|(_, p)| p.clone())
+        .unwrap_or_default();
+    info.srid = Some(srid);
+    info.easting = Some(easting);
+    info.northing = Some(northing);
+    if let Some(r) = rotation {
+        info.true_north = r;
+    }
+    if let Some(h) = elevation {
+        info.elevation = h;
+    }
+    if let Some(v) = lat {
+        info.latitude = Some(v);
+    }
+    if let Some(v) = lon {
+        info.longitude = Some(v);
+    }
+    let tx = creabim_core::set_project(doc.model(), info);
+    doc.commit(tx).map_err(|e| e.to_string())?;
+    save_script_doc(&doc, &out)?;
+    println!("project placed (model origin in {})", out);
     Ok(())
 }
 

@@ -619,3 +619,322 @@ mod tests {
         assert!(t.validate().is_ok());
     }
 }
+
+/// A loaded map layer: 2D vector geography from a GeoPackage — BGT
+/// parcels/roads/water/green, BAG footprints, cadastral parcels.
+///
+/// One element per source layer; features inside are keyed by source
+/// row-id, so a giskit upgrade syncs surgically (small journal,
+/// manual edits elsewhere survive). Never meshed: mesh conversion
+/// futzes the drawing (fan edges instead of the true outline,
+/// categories reduced to name strings). The plan draws the true
+/// outlines with the category's hatch; selection and provenance ride
+/// the element like any other.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum SiteCategory {
+    Parcel,
+    Building,
+    Road,
+    Water,
+    Green,
+    Structure,
+    Boundary,
+    /// Layers no variant covers yet.
+    #[serde(untagged)]
+    Other(String),
+}
+
+impl SiteCategory {
+    /// The plan hatch for the category.
+    pub fn hatch(&self) -> crate::Hatch {
+        use crate::Hatch::*;
+        match self {
+            SiteCategory::Parcel => Empty,
+            SiteCategory::Building => Solid,
+            SiteCategory::Road => Diagonal,
+            SiteCategory::Water => Cross,
+            SiteCategory::Green => Timber,
+            SiteCategory::Structure => Concrete,
+            SiteCategory::Boundary => Empty,
+            // Unmapped layers draw as bare outlines: quiet, and visibly
+            // uncategorised (recategorise the element to fill them).
+            SiteCategory::Other(_) => Empty,
+        }
+    }
+
+    /// The BGT/kadaster layer names that map onto each category.
+    /// Recipe defaults; projects override by editing the element.
+    /// Matches the last `_`-separated segment, so provider prefixes
+    /// (`bgt_`, `kadastralekaart-wfs_`, …) fall away.
+    pub fn of_layer(layer: &str) -> Self {
+        // BAG3D detail layers are buildings whatever the LoD suffix.
+        if layer.starts_with("bag3d") {
+            return SiteCategory::Building;
+        }
+        let base = layer.rsplit('/').next().unwrap_or(layer);
+        // BGT geometry suffixes are not part of the name.
+        let base = base
+            .strip_suffix("_vlak")
+            .or_else(|| base.strip_suffix("_lijn"))
+            .or_else(|| base.strip_suffix("_punt"))
+            .unwrap_or(base);
+        let base = base.rsplit('_').next().unwrap_or(base);
+        match base {
+            "perceel" => SiteCategory::Parcel,
+            "pand" | "bebouwing" => SiteCategory::Building,
+            "wegdeel" | "ondersteunendwegdeel" | "openbareruimte" => SiteCategory::Road,
+            "waterdeel" | "ondersteunendwaterdeel" => SiteCategory::Water,
+            "begroeidterreindeel" | "vegetatieobject" => SiteCategory::Green,
+            "overbruggingsdeel" | "tunneldeel" | "overigbouwwerk" | "kunstwerkdeel" => {
+                SiteCategory::Structure
+            }
+            "kadastrale-grens" | "grens" | "scheiding" => SiteCategory::Boundary,
+            other => SiteCategory::Other(other.to_string()),
+        }
+    }
+}
+
+/// One feature's shape: a filled polygon (with holes) or an open polyline.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum SiteGeometry {
+    Polygon {
+        exterior: Vec<DVec2>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        holes: Vec<Vec<DVec2>>,
+    },
+    Polyline {
+        points: Vec<DVec2>,
+    },
+}
+
+impl SiteGeometry {
+    fn validate(&self) -> Result<(), String> {
+        let finite = |p: &DVec2| p.is_finite();
+        match self {
+            SiteGeometry::Polygon { exterior, holes } => {
+                if exterior.len() < 3 || !exterior.iter().all(finite) {
+                    return Err("a site polygon needs 3 finite corners".into());
+                }
+                for h in holes {
+                    if h.len() < 3 || !h.iter().all(finite) {
+                        return Err("a site hole needs 3 finite corners".into());
+                    }
+                }
+                Ok(())
+            }
+            SiteGeometry::Polyline { points } => {
+                if points.len() < 2 || !points.iter().all(finite) {
+                    return Err("a site polyline needs 2 finite points".into());
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Every point, for transforms.
+    pub(crate) fn map(&mut self, f: impl Fn(DVec2) -> DVec2) {
+        match self {
+            SiteGeometry::Polygon { exterior, holes } => {
+                for p in exterior.iter_mut() {
+                    *p = f(*p);
+                }
+                for h in holes {
+                    for p in h.iter_mut() {
+                        *p = f(*p);
+                    }
+                }
+            }
+            SiteGeometry::Polyline { points } => {
+                for p in points.iter_mut() {
+                    *p = f(*p);
+                }
+            }
+        }
+    }
+}
+
+/// One row of the source layer, keyed by its id there.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SiteRow {
+    pub key: String,
+    pub geom: SiteGeometry,
+}
+
+/// One source layer's worth of site geography.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SiteFeature {
+    /// The source layer name (what the registry and sync match on).
+    pub layer: String,
+    pub category: SiteCategory,
+    pub features: Vec<SiteRow>,
+}
+
+impl SiteFeature {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.layer.is_empty() {
+            return Err("a site layer needs a name".into());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for f in &self.features {
+            if !seen.insert(&f.key) {
+                return Err(format!("site row {:?} is listed twice", f.key));
+            }
+            f.geom.validate()?;
+        }
+        Ok(())
+    }
+
+    /// The plan area, in square metres (polygons only).
+    pub fn area(&self) -> f64 {
+        self.features
+            .iter()
+            .filter_map(|f| match &f.geom {
+                SiteGeometry::Polygon { exterior, holes } => {
+                    let ring = |pts: &[DVec2]| {
+                        pts.iter()
+                            .zip(pts.iter().skip(1).chain(pts.first()))
+                            .map(|(a, b)| a.x * b.y - b.x * a.y)
+                            .sum::<f64>()
+                            .abs()
+                            / 2.0
+                    };
+                    Some(ring(exterior) - holes.iter().map(|h| ring(h)).sum::<f64>())
+                }
+                _ => None,
+            })
+            .sum()
+    }
+}
+
+#[cfg(test)]
+mod site_feature_tests {
+    use super::*;
+
+    fn poly(n: usize) -> SiteGeometry {
+        SiteGeometry::Polygon {
+            exterior: (0..n)
+                .map(|i| DVec2::new(i as f64, (i % 2) as f64))
+                .collect(),
+            holes: vec![],
+        }
+    }
+
+    #[test]
+    fn validation_catches_degenerate_shapes() {
+        assert!(poly(3).validate().is_ok());
+        assert!(poly(2).validate().is_err());
+        assert!(SiteGeometry::Polyline {
+            points: vec![DVec2::new(f64::NAN, 0.0), DVec2::X],
+        }
+        .validate()
+        .is_err());
+        let mut s = SiteFeature {
+            layer: "".into(),
+            category: SiteCategory::Parcel,
+            features: vec![],
+        };
+        assert!(s.validate().is_err());
+        s.layer = "perceel".into();
+        s.features = vec![
+            SiteRow {
+                key: "1".into(),
+                geom: poly(4),
+            },
+            SiteRow {
+                key: "1".into(),
+                geom: poly(4),
+            },
+        ];
+        assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn area_counts_polygons_minus_holes() {
+        let s = SiteFeature {
+            layer: "x".into(),
+            category: SiteCategory::Parcel,
+            features: vec![SiteRow {
+                key: "1".into(),
+                geom: SiteGeometry::Polygon {
+                    exterior: vec![
+                        DVec2::new(0.0, 0.0),
+                        DVec2::new(4.0, 0.0),
+                        DVec2::new(4.0, 3.0),
+                        DVec2::new(0.0, 3.0),
+                    ],
+                    holes: vec![vec![
+                        DVec2::new(1.0, 1.0),
+                        DVec2::new(2.0, 1.0),
+                        DVec2::new(2.0, 2.0),
+                        DVec2::new(1.0, 2.0),
+                    ]],
+                },
+            }],
+        };
+        assert!((s.area() - 11.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn layer_names_map_to_categories() {
+        assert_eq!(SiteCategory::of_layer("bgt_wegdeel"), SiteCategory::Road);
+        assert_eq!(
+            SiteCategory::of_layer("kadastralekaart-wfs_perceel"),
+            SiteCategory::Parcel
+        );
+        assert_eq!(SiteCategory::of_layer("bag_pand"), SiteCategory::Building);
+        assert_eq!(SiteCategory::of_layer("bgt_waterdeel"), SiteCategory::Water);
+        assert!(matches!(
+            SiteCategory::of_layer("something_new"),
+            SiteCategory::Other(_)
+        ));
+    }
+
+    fn linked_layer() -> (crate::Document, crate::ElementId) {
+        use crate::{Document, Element, ElementKind, Model, Source, Transaction};
+        let mut doc = Document::from_model(Model::new());
+        let mut el = Element::new(
+            "Site bgt_wegdeel",
+            ElementKind::SiteFeature(SiteFeature {
+                layer: "bgt_wegdeel".into(),
+                category: SiteCategory::Road,
+                features: vec![SiteRow {
+                    key: "1".into(),
+                    geom: poly(4),
+                }],
+            }),
+        );
+        el.source = Some(Source {
+            file: "site.gpkg".into(),
+            object: "bgt_wegdeel".into(),
+            stamp: 1,
+        });
+        let id = el.id;
+        doc.commit(Transaction::new("link").insert(el)).unwrap();
+        (doc, id)
+    }
+
+    #[test]
+    fn linked_layers_reject_casual_replaces() {
+        use crate::{ModelError, Transaction};
+        let (mut doc, id) = linked_layer();
+        // A hand edit fails loudly, naming the source file.
+        let err = doc
+            .edit(id, "Move layer", |e| e.name = "moved".into())
+            .unwrap_err();
+        assert!(
+            matches!(err, ModelError::ManagedBySite { .. }),
+            "direct replace is locked: {err:?}"
+        );
+        // The site editor's own transactions pass (labelled `site …`).
+        let before = doc.model().get(id).cloned().unwrap();
+        let mut after = before.clone();
+        after.name = "moved by editor".into();
+        doc.commit(Transaction::new("site move site.gpkg").replace(before, after))
+            .expect("editor rewrites pass");
+        // Removes stay allowed: reload re-creates known layers.
+        let gone = doc.model().get(id).cloned().unwrap();
+        doc.commit(Transaction::new("unlink").remove_cascade(doc.model(), gone.id))
+            .expect("removes pass");
+        assert!(doc.model().get(id).is_none());
+    }
+}
