@@ -112,7 +112,9 @@ pub use objects::{CatalogueObject, Object, ObjectCategory, ObjectType};
 pub use ops::{Op, Transaction};
 pub use papermark::{PaperMark, PaperMarkKind};
 pub use parts::Part;
-pub use project::{decimal_to_dms, dms_to_decimal, set_project, GeoPlacement, ProjectInfo};
+pub use project::{
+    decimal_to_dms, dms_to_decimal, set_project, Cardinal, GeoPlacement, ProjectInfo,
+};
 pub use reference::{RefSource, Reference};
 pub use room::{Ceiling, Room, RoomField, Separator};
 pub use screen::ScreenPattern;
@@ -121,7 +123,9 @@ pub use script::{
     remap_fresh_ids, set_link_tx, slug, ParamDecl, ParamInput, ParamKind, ParamValue, ScriptLink,
     ScriptObject, ScriptOutput, ScriptRegistry,
 };
-pub use site::{PlantForm, Site, SiteCategory, SiteFeature, SiteForm, SiteGeometry, SiteRow};
+pub use site::{
+    LayerStyle, PlantForm, Site, SiteCategory, SiteFeature, SiteForm, SiteGeometry, SiteRow,
+};
 pub use sketch::{bulge_through, Circle, Curve, SegmentKind};
 pub use slab::{room_outline, slab_from_sketch, Shaft};
 pub use titleblock::SheetTemplate;

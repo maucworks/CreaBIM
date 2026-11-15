@@ -555,6 +555,11 @@ pub struct PlanState {
     pub align_ref: Option<(ElementId, Vec<DVec2>)>,
     /// Align's four points, picked, for the app to apply.
     pub aligned: Option<(ElementId, [DVec2; 4])>,
+    /// The site editor's ask: a point of the geography to call zero, or
+    /// a line of it to point north, east, south or west.
+    pub site_pick: Option<SitePick>,
+    /// The site editor's pick, done, for the app to place the project by.
+    pub site_picked: Option<SitePickHit>,
     /// Picture or DXF files dropped on a view, and where (MU23).
     pub dropped: Vec<(ElementId, DVec2, std::path::PathBuf)>,
     pub calibrated: Option<(ElementId, DVec2, DVec2)>,
@@ -696,6 +701,8 @@ impl Default for PlanState {
             calibrate: None,
             close_outline: false,
             align_ref: None,
+            site_pick: None,
+            site_picked: None,
             aligned: None,
             dropped: vec![],
             calibrated: None,
@@ -1159,8 +1166,19 @@ pub fn show(
     let ghost = state.spotlight_ghost && !state.spotlight.is_empty();
     let mut faint = painter.clone();
     faint.set_opacity(0.22);
-    // the view's graphic overrides, as on its sheets (MU27)
-    let overrides = view_overrides(doc.model(), view);
+    // the view's graphic overrides, as on its sheets (MU27), with the
+    // linked site layers' own styles underneath: a view that colours a
+    // layer wins, else the layer draws as its editor set it
+    let mut overrides = view_overrides(doc.model(), view);
+    for (id, style) in layer_style_overrides(doc.model()) {
+        let o = overrides.entry(id).or_default();
+        if o.colour.is_none() {
+            o.colour = style.colour;
+        }
+        if !o.dashed {
+            o.pattern = style.pattern;
+        }
+    }
     for item in &plan.items {
         let lit = state.spotlight.contains(&item.id());
         let selected = selection.contains(item.id()) || lit;
@@ -2698,6 +2716,14 @@ pub fn show(
         state.status = Some("Calibrate cancelled.".into());
         return None;
     }
+    // The site editor's pick: right-click or Esc stops it
+    if state.site_pick.is_some()
+        && (response.secondary_clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)))
+    {
+        state.site_pick = None;
+        state.status = Some("Site pick cancelled.".into());
+        return None;
+    }
     // files dropped on the view: pictures and DXF drawings become
     // references here, at the pointer (MU23)
     let drops: Vec<std::path::PathBuf> = ui.input(|i| {
@@ -2802,6 +2828,72 @@ pub fn show(
             } else {
                 state.status =
                     Some("Calibrate: click a second point a known distance from the first.".into());
+            }
+        }
+        return None;
+    }
+    // The site editor's pick: a geography point to call zero, or a line
+    // to point a cardinal way. One click on the snapped shape settles it.
+    if let Some(what) = state.site_pick {
+        if !matches!(kind, PaneKind::Plan { .. }) {
+            state.site_pick = None;
+            state.status = Some("Site picks happen on a plan.".into());
+            return None;
+        }
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
+        let tol = 8.0 / xf.scale as f64;
+        let raw = response.hover_pos().map(|p| xf.to_world(p));
+        let snap = raw.and_then(|p| site_snap(doc.model(), p, tol, matches!(what, SitePick::Line(_))));
+        let pick_color = Color32::from_rgb(230, 120, 40);
+        if let Some(s) = &snap {
+            match s {
+                SiteSnap::Vertex(q) => {
+                    painter.circle_filled(xf.to_screen(*q), 5.0, pick_color);
+                }
+                SiteSnap::Edge(a, b) => {
+                    painter.line_segment(
+                        [xf.to_screen(*a), xf.to_screen(*b)],
+                        Stroke::new(2.5, pick_color),
+                    );
+                }
+            }
+        }
+        let asking: String = match what {
+            SitePick::Zero => "Site: click a point of the geography to call zero (Esc: cancel).".to_string(),
+            SitePick::Line(c) => {
+                let way = match c {
+                    creabim_core::Cardinal::North => "north",
+                    creabim_core::Cardinal::East => "east",
+                    creabim_core::Cardinal::South => "south",
+                    creabim_core::Cardinal::West => "west",
+                };
+                format!("Site: click a line of the geography to point {way} (Esc: cancel).")
+            }
+        };
+        state.status = Some(asking);
+        if response.clicked() {
+            match snap {
+                Some(SiteSnap::Vertex(q)) => {
+                    state.site_picked = Some(SitePickHit::Zero(q));
+                    state.site_pick = None;
+                }
+                Some(SiteSnap::Edge(a, b)) => {
+                    state.site_picked = Some(SitePickHit::Line(
+                        match what {
+                            SitePick::Line(c) => c,
+                            SitePick::Zero => unreachable!("an edge under a zero pick"),
+                        },
+                        a,
+                        b,
+                    ));
+                    state.site_pick = None;
+                }
+                None => {
+                    state.status =
+                        Some("Site: nothing of the geography under the pointer — click closer to a layer's point or line.".into());
+                }
             }
         }
         return None;
@@ -5462,7 +5554,7 @@ fn draw_metric_grid(painter: &egui::Painter, xf: &Xf) {
 /// sizes hatching and annotations.
 /// A view's graphic overrides for one element, as the working view draws
 /// them (MU27: they only showed on sheets and in PDF).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Ovr {
     /// 0 drawn fully, 1 gone: halftone and transparency.
     pub fade: f32,
@@ -5472,6 +5564,10 @@ pub struct Ovr {
     pub proj: f32,
     pub cut: f32,
     pub dashed: bool,
+    /// The line pattern a linked site layer draws its projection lines
+    /// in (its editor's line type), with its own dash lengths; None
+    /// draws the pen's own (or the plain dashed look when `dashed`).
+    pub pattern: Option<creabim_core::styles::LinePattern>,
 }
 
 impl Default for Ovr {
@@ -5483,6 +5579,7 @@ impl Default for Ovr {
             proj: 1.0,
             cut: 1.0,
             dashed: false,
+            pattern: None,
         }
     }
 }
@@ -5551,6 +5648,168 @@ pub fn view_overrides(model: &creabim_core::Model, view: ElementId) -> HashMap<E
         out.insert(e.id, r);
     }
     out
+}
+
+/// How each linked site layer draws on its own: what its editor set
+/// per layer — line colour, line pattern. The plan's fill colour rides
+/// the item itself; visibility is a no-items layer. Empty when no
+/// layer is styled.
+pub fn layer_style_overrides(
+    model: &creabim_core::Model,
+) -> HashMap<ElementId, Ovr> {
+    use creabim_core::styles::LinePattern;
+    let mut out = HashMap::new();
+    for e in model.iter() {
+        let ElementKind::SiteFeature(s) = &e.kind else {
+            continue;
+        };
+        if s.style.is_default() {
+            continue;
+        }
+        let mut r = Ovr::default();
+        if let Some(c) = s.style.line {
+            r.colour = Some(Color32::from_rgb(
+                (c.0[0] * 255.0) as u8,
+                (c.0[1] * 255.0) as u8,
+                (c.0[2] * 255.0) as u8,
+            ));
+        }
+        if let Some(pat) = &s.style.pattern {
+            r.pattern = (!matches!(pat, LinePattern::Solid)).then(|| pat.clone());
+        }
+        out.insert(e.id, r);
+    }
+    out
+}
+
+/// What the site editor asks a plan click for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SitePick {
+    /// A point of the geography that becomes the model origin.
+    Zero,
+    /// A line of the geography that is to run this way in the model.
+    Line(creabim_core::Cardinal),
+}
+
+/// A site pick's result, in model metres: the point, or the line's ends
+/// with the way it is to point.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SitePickHit {
+    Zero(DVec2),
+    Line(creabim_core::Cardinal, DVec2, DVec2),
+}
+
+/// The nearest geography under the pointer for a site pick.
+enum SiteSnap {
+    Vertex(DVec2),
+    Edge(DVec2, DVec2),
+}
+
+/// The nearest point or edge of the linked site layers within `tol`
+/// model metres of `p`. Only visible layers count; a `line` pick reads
+/// edges (polygon rings read closed), a point pick reads every vertex.
+fn site_snap(
+    model: &creabim_core::Model,
+    p: DVec2,
+    tol: f64,
+    line: bool,
+) -> Option<SiteSnap> {
+    use creabim_core::SiteGeometry;
+    let mut best: Option<(f64, SiteSnap)> = None;
+    let keep = |d: f64, s: SiteSnap, best: &mut Option<(f64, SiteSnap)>| {
+        if d <= tol && best.as_ref().is_none_or(|(b, _)| d < *b) {
+            *best = Some((d, s));
+        }
+    };
+    for e in model.iter() {
+        let ElementKind::SiteFeature(s) = &e.kind else {
+            continue;
+        };
+        if !s.style.visible {
+            continue;
+        }
+        for f in &s.features {
+            let (rings, closed): (Vec<&Vec<DVec2>>, bool) = match &f.geom {
+                SiteGeometry::Polygon { exterior, holes } => {
+                    let mut r = vec![exterior];
+                    r.extend(holes.iter());
+                    (r, true)
+                }
+                SiteGeometry::Polyline { points } => (vec![points], false),
+            };
+            if !line {
+                for ring in &rings {
+                    for q in ring.iter() {
+                        keep(q.distance(p), SiteSnap::Vertex(*q), &mut best);
+                    }
+                }
+            } else {
+                for ring in &rings {
+                    let n = ring.len();
+                    let last = if closed { n } else { n.saturating_sub(1) };
+                    for i in 0..last {
+                        let (a, b) = (ring[i], ring[(i + 1) % n]);
+                        keep(seg_dist(p, a, b), SiteSnap::Edge(a, b), &mut best);
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(_, s)| s)
+}
+
+/// Distance from `p` to the segment `a`→`b`.
+fn seg_dist(p: DVec2, a: DVec2, b: DVec2) -> f64 {
+    let d = b - a;
+    let t = ((p - a).dot(d) / d.length_squared().max(1e-18)).clamp(0.0, 1.0);
+    p.distance(a + d * t)
+}
+
+/// Segments drawn in a dash pattern: `dashes` is dash, gap, dash, gap…
+/// in paper mm (a dash of 0 is a dot), walked along each segment.
+/// Degenerate patterns draw solid.
+fn pattern_segments(
+    painter: &egui::Painter,
+    segs: &[[Pos2; 2]],
+    stroke: Stroke,
+    dashes: &[f64],
+    px_per_mm: f64,
+) {
+    let ok = dashes.len() >= 2 && dashes.iter().all(|d| *d >= 0.0) && dashes.iter().sum::<f64>() > 0.0;
+    if !ok {
+        for &[a, b] in segs {
+            painter.line_segment([a, b], stroke);
+        }
+        return;
+    }
+    let px: Vec<f32> = dashes
+        .iter()
+        .map(|d| ((*d * px_per_mm) as f32).max(0.0))
+        .collect();
+    let dot = (stroke.width * 1.6).max(1.2);
+    for &[a, b] in segs {
+        let d = b - a;
+        let len = d.length();
+        if len < 1e-3 {
+            continue;
+        }
+        let step = d / len;
+        let mut at = 0.0f32;
+        let mut i = 0usize;
+        while at < len {
+            let on = px[i % px.len()];
+            let off = px[(i + 1) % px.len()];
+            let end = (at + on).min(len);
+            let p = a + step * at;
+            if on <= 1e-3 {
+                painter.circle_filled(p, dot / 2.0, stroke.color);
+            } else {
+                painter.line_segment([p, a + step * end], stroke);
+            }
+            at = end + off;
+            i += 2;
+        }
+    }
 }
 
 pub fn draw_item(painter: &egui::Painter, xf: &Xf, item: &PlanItem, selected: bool, mm: f64) {
@@ -5630,7 +5889,17 @@ pub fn draw_item_with(
                     } else {
                         (1.0 * o.proj, grey(120))
                     };
-                    painter.add(egui::Shape::closed_line(pts, Stroke::new(w, c)));
+                    let stroke = Stroke::new(w, c);
+                    if let Some(dashes) = o.pattern.as_ref().and_then(|p| p.dashes()) {
+                        let segs: Vec<[Pos2; 2]> = (0..pts.len())
+                            .map(|i| [pts[i], pts[(i + 1) % pts.len()]])
+                            .collect();
+                        pattern_segments(painter, &segs, stroke, &dashes, mm * xf.scale as f64);
+                    } else if o.dashed {
+                        painter.extend(egui::Shape::dashed_line(&pts, stroke, 6.0, 4.0));
+                    } else {
+                        painter.add(egui::Shape::closed_line(pts, stroke));
+                    }
                 }
             }
         }
@@ -5674,15 +5943,18 @@ pub fn draw_item_with(
                     } else {
                         (1.0 * o.proj, grey(120))
                     };
-                    if o.dashed {
+                    let stroke = Stroke::new(w, c);
+                    if let Some(dashes) = o.pattern.as_ref().and_then(|p| p.dashes()) {
+                        pattern_segments(painter, &[[a, b]], stroke, &dashes, mm * xf.scale as f64);
+                    } else if o.dashed {
                         painter.extend(egui::Shape::dashed_line(
                             &[a, b],
-                            Stroke::new(w, c),
+                            stroke,
                             6.0,
                             4.0,
                         ));
                     } else {
-                        painter.line_segment([a, b], Stroke::new(w, c));
+                        painter.line_segment([a, b], stroke);
                     }
                 }
                 Pen::Cut => {

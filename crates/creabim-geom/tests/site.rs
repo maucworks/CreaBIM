@@ -21,6 +21,7 @@ fn site_model() -> (Document, ElementId) {
         ElementKind::SiteFeature(SiteFeature {
             layer: "bgt_waterdeel".into(),
             category: SiteCategory::Water,
+            style: LayerStyle::default(),
             features: vec![SiteRow {
                 key: "1".into(),
                 geom: SiteGeometry::Polygon {
@@ -41,6 +42,7 @@ fn site_model() -> (Document, ElementId) {
         ElementKind::SiteFeature(SiteFeature {
             layer: "kadastrale_grens".into(),
             category: SiteCategory::Boundary,
+            style: LayerStyle::default(),
             features: vec![SiteRow {
                 key: "2".into(),
                 geom: SiteGeometry::Polyline {
@@ -94,6 +96,56 @@ fn site_polygons_fill_and_outline_on_every_plan() {
         })
         .collect();
     assert_eq!(lines.len(), 1);
+}
+
+#[test]
+fn a_hidden_layer_draws_nothing_and_a_style_colours_the_fill() {
+    use creabim_core::styles::Rgb;
+    let (mut doc, lid) = site_model();
+    // the water gets a fill colour under its hatch
+    let water = doc
+        .model()
+        .iter()
+        .find(|e| e.name == "Site water")
+        .unwrap()
+        .clone();
+    let mut styled = water.clone();
+    if let ElementKind::SiteFeature(s) = &mut styled.kind {
+        s.style.fill = Some(Rgb([0.2, 0.4, 0.6]));
+    }
+    doc.commit(Transaction::new("site style test").replace(water, styled))
+        .unwrap();
+    // the boundary layer hides project-wide
+    let bound = doc
+        .model()
+        .iter()
+        .find(|e| e.name == "Site grens")
+        .unwrap()
+        .clone();
+    let mut hidden = bound.clone();
+    if let ElementKind::SiteFeature(s) = &mut hidden.kind {
+        s.style.visible = false;
+    }
+    doc.commit(Transaction::new("site hide test").replace(bound, hidden))
+        .unwrap();
+    let plan = plan_view(doc.model(), lid, 1.2);
+    let fills: Vec<_> = plan
+        .items
+        .iter()
+        .filter_map(|it| match it {
+            PlanItem::Fill { hatch, rgb, .. } => Some((*hatch, *rgb)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fills.len(), 1, "only the water still fills, {fills:?}");
+    assert!(fills[0].1.is_some_and(|c| (c[0] - 0.2).abs() < 1e-6));
+    assert!(
+        !plan.items.iter().any(|it| matches!(
+            it,
+            PlanItem::Line { pen: Pen::Projection, .. }
+        )),
+        "the hidden boundary draws no polyline"
+    );
 }
 
 #[test]

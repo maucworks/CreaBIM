@@ -15,7 +15,7 @@
 //! [`crate::catalogue`]). What each pattern or plant stands for is data:
 //! the sizes and spacings are the element's own.
 
-use crate::{transform::Xform, ElementId, Model};
+use crate::{styles::LinePattern, styles::Rgb, transform::Xform, ElementId, Model};
 use glam::{DVec2, DVec3};
 use serde::{Deserialize, Serialize};
 
@@ -767,6 +767,51 @@ pub struct SiteFeature {
     pub layer: String,
     pub category: SiteCategory,
     pub features: Vec<SiteRow>,
+    /// How the layer draws, project-wide, as its editor sets it. A
+    /// reload rewrites the features and the category but keeps this:
+    /// the layer's look is the project's, not the file's.
+    #[serde(default)]
+    pub style: LayerStyle,
+}
+
+/// How one linked layer draws: its fill and line colours, its line
+/// pattern, whether it shows at all. What is left out draws as the
+/// category does. (Hiding single rows of a layer — a neighbour's
+/// extension you don't want — is a `hidden_rows` list here later.)
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LayerStyle {
+    /// Under the category hatch; none keeps the hatch's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<Rgb>,
+    /// The outlines and polylines; none keeps the pen's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<Rgb>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<LinePattern>,
+    #[serde(default = "default_visible")]
+    pub visible: bool,
+}
+
+fn default_visible() -> bool {
+    true
+}
+
+impl Default for LayerStyle {
+    fn default() -> Self {
+        Self {
+            fill: None,
+            line: None,
+            pattern: None,
+            visible: true,
+        }
+    }
+}
+
+impl LayerStyle {
+    /// Nothing set: the category draws as it always did.
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl SiteFeature {
@@ -832,6 +877,7 @@ mod site_feature_tests {
             layer: "".into(),
             category: SiteCategory::Parcel,
             features: vec![],
+            style: LayerStyle::default(),
         };
         assert!(s.validate().is_err());
         s.layer = "perceel".into();
@@ -853,6 +899,7 @@ mod site_feature_tests {
         let s = SiteFeature {
             layer: "x".into(),
             category: SiteCategory::Parcel,
+            style: LayerStyle::default(),
             features: vec![SiteRow {
                 key: "1".into(),
                 geom: SiteGeometry::Polygon {
@@ -897,6 +944,7 @@ mod site_feature_tests {
             ElementKind::SiteFeature(SiteFeature {
                 layer: "bgt_wegdeel".into(),
                 category: SiteCategory::Road,
+                style: LayerStyle::default(),
                 features: vec![SiteRow {
                     key: "1".into(),
                     geom: poly(4),
@@ -936,5 +984,33 @@ mod site_feature_tests {
         doc.commit(Transaction::new("unlink").remove_cascade(doc.model(), gone.id))
             .expect("removes pass");
         assert!(doc.model().get(id).is_none());
+    }
+
+    #[test]
+    fn a_style_survives_and_old_files_load() {
+        // a layer saved before LayerStyle existed: no `style` in the JSON
+        let old = r#"{"layer":"wijk","category":"Road","features":[{"key":"1",
+            "geom":{"Polygon":{"exterior":[[0,0],[10,0],[10,10]]}}}]}"#;
+        let s: SiteFeature = serde_json::from_str(old).unwrap();
+        assert_eq!(s.style, LayerStyle::default());
+        let round: SiteFeature =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(round, s);
+        // a styled one keeps its style through the round trip
+        let styled = SiteFeature {
+            layer: "wijk".into(),
+            category: SiteCategory::Road,
+            style: LayerStyle {
+                fill: Some(Rgb([0.2, 0.4, 0.6])),
+                line: None,
+                pattern: Some(LinePattern::Dashed),
+                visible: false,
+            },
+            features: s.features,
+        };
+        let back: SiteFeature =
+            serde_json::from_str(&serde_json::to_string(&styled).unwrap()).unwrap();
+        assert_eq!(back, styled);
+        assert!(!back.style.is_default());
     }
 }

@@ -43,6 +43,53 @@ fn srs_name(path: &str, srs_id: i32) -> Result<(String, String), String> {
     Ok((org, id.to_string()))
 }
 
+/// A GeoPackage's CRS and extent, read before anything is loaded: what
+/// a project needs to place it (the CRS becomes the project's, the
+/// extent's middle is where the model origin starts).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileGeo {
+    /// `ORG:ID`, as the placement's `srid` wants it.
+    pub crs: String,
+    /// min_x, min_y, max_x, max_y in the file's CRS; None when
+    /// `gpkg_contents` carries no extent.
+    pub bounds: Option<(f64, f64, f64, f64)>,
+}
+
+/// The CRS and extent of the first layer that has both.
+pub fn file_geo(path: &str) -> Result<FileGeo, String> {
+    let db =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| format!("{path}: {e}"))?;
+    let mut stmt = db
+        .prepare(
+            "SELECT srs_id, min_x, min_y, max_x, max_y FROM gpkg_contents
+             WHERE srs_id IS NOT NULL AND data_type = 'features'",
+        )
+        .map_err(|e| format!("{path}: {e}"))?;
+    let rows: Vec<(i64, f64, f64, f64, f64)> = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
+                r.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
+                r.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+                r.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
+            ))
+        })
+        .map_err(|e| format!("{path}: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+    let (srs, bounds) = rows
+        .first()
+        .map(|(srs, x0, y0, x1, y1)| (*srs, Some((*x0, *y0, *x1, *y1))))
+        .ok_or_else(|| format!("{path}: no feature layers with a CRS"))?;
+    let (org, id) = srs_name(path, srs as i32)?;
+    Ok(FileGeo {
+        crs: format!("{org}:{id}"),
+        bounds,
+    })
+}
+
 /// Load every 2D vector layer of `path` into the model, transformed by
 /// `placement`. The file must already sit in the placement's CRS —
 /// reprojecting on import is out (trap: silent datum shifts).
@@ -75,6 +122,14 @@ pub fn sync_site(
                 "{} ({} — not a 2D vector layer)",
                 layer.name, layer.geom_type
             ));
+            // BAG3D's buildings are 3D masses, bespoke to the NL tiles:
+            // their 3D ingest is its own reader later on. Name them so
+            // nobody wonders where they went.
+            if layer.name.starts_with("bag3d") {
+                report
+                    .notes
+                    .push(format!("{}: BAG3D 3D masses are not loaded yet; their footprint layers draw in plan.", layer.name));
+            }
             continue;
         }
         let (org, id) = srs_name(path, layer.srs)?;
@@ -126,6 +181,7 @@ pub fn sync_site(
                     ElementKind::SiteFeature(SiteFeature {
                         layer: layer.name.clone(),
                         category: SiteCategory::of_layer(&layer.name),
+                        style: creabim_core::LayerStyle::default(),
                         features: rows,
                     }),
                 );
@@ -201,7 +257,9 @@ mod tests {
         db.execute_batch(
             "CREATE TABLE gpkg_geometry_columns (table_name TEXT, column_name TEXT, geometry_type_name TEXT, srs_id INTEGER);
              CREATE TABLE gpkg_spatial_ref_sys (srs_id INTEGER PRIMARY KEY, organization TEXT, organization_coordsys_id INTEGER, definition TEXT);
+             CREATE TABLE gpkg_contents (table_name TEXT, data_type TEXT, srs_id INTEGER, min_x DOUBLE, min_y DOUBLE, max_x DOUBLE, max_y DOUBLE);
              INSERT INTO gpkg_spatial_ref_sys VALUES (28992, 'EPSG', '28992', 'x');
+             INSERT INTO gpkg_contents VALUES ('wijk', 'features', 28992, 9510.0, 308000.0, 9530.0, 308020.0);
              CREATE TABLE wijk (fid INTEGER PRIMARY KEY, geom BLOB);
              INSERT INTO gpkg_geometry_columns VALUES ('wijk', 'geom', 'POLYGON', 28992);",
         )
@@ -314,5 +372,66 @@ mod tests {
         };
         let err = sync_site(&Model::new(), &path, &g).unwrap_err();
         assert!(err.contains("28992"), "{err}");
+    }
+
+    #[test]
+    fn file_geo_reads_the_crs_and_extent() {
+        let (_dir, path, _) = test_gpkg("geo");
+        let g = file_geo(&path).unwrap();
+        assert_eq!(g.crs, "EPSG:28992");
+        assert_eq!(g.bounds, Some((9510.0, 308000.0, 9530.0, 308020.0)));
+    }
+
+    #[test]
+    fn a_reload_keeps_the_layer_style() {
+        use creabim_core::styles::{LinePattern, Rgb};
+        use creabim_core::LayerStyle;
+        let (_dir, path, g) = test_gpkg("style");
+        let mut doc = Document::from_model(Model::new());
+        let (tx, _) = sync_site(doc.model(), &path, &g).unwrap();
+        doc.commit(tx).unwrap();
+        let id = doc
+            .model()
+            .iter()
+            .find(|e| matches!(e.kind, ElementKind::SiteFeature(_)))
+            .unwrap()
+            .id;
+        // the site editor styles the layer under a `site …` label
+        let before = doc.model().get(id).cloned().unwrap();
+        let mut styled = before.clone();
+        if let ElementKind::SiteFeature(s) = &mut styled.kind {
+            s.style = LayerStyle {
+                fill: Some(Rgb([0.3, 0.5, 0.7])),
+                line: Some(Rgb([0.9, 0.1, 0.1])),
+                pattern: Some(LinePattern::Dashed),
+                visible: true,
+            };
+        }
+        doc.commit(Transaction::new("site style site.gpkg").replace(before, styled))
+            .unwrap();
+        // the file changes (a new stamp), the layer reloads: style intact
+        let (tx, report) = sync_site(doc.model(), &path, &g).unwrap();
+        assert_eq!(report.unchanged, 1, "an unchanged file must not rewrite");
+        assert!(tx.ops.is_empty());
+        // now force a change: the layer's stamp differs only when rows do;
+        // so restamp by hand and sync again — the point is the same path
+        let before = doc.model().get(id).cloned().unwrap();
+        let mut bumped = before.clone();
+        if let Some(src) = bumped.source.as_mut() {
+            src.stamp += 1;
+        }
+        doc.commit(Transaction::new("site test bump").replace(before, bumped))
+            .unwrap();
+        let (tx, report) = sync_site(doc.model(), &path, &g).unwrap();
+        assert_eq!(report.updated, 1);
+        assert!(!tx.ops.is_empty());
+        let el = doc.model().get(id).unwrap();
+        match &el.kind {
+            ElementKind::SiteFeature(s) => {
+                assert_eq!(s.style.line, Some(Rgb([0.9, 0.1, 0.1])));
+                assert_eq!(s.style.pattern, Some(LinePattern::Dashed));
+            }
+            _ => unreachable!(),
+        }
     }
 }

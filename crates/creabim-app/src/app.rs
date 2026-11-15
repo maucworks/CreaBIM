@@ -65,6 +65,8 @@ mod profilesui;
 mod reportui;
 #[path = "selectsimilar.rs"]
 mod selectsimilar;
+#[path = "siteui.rs"]
+mod siteui;
 #[path = "shell.rs"]
 pub(crate) mod shell;
 #[path = "stylesui.rs"]
@@ -272,6 +274,8 @@ pub struct CreaBimApp {
     /// The Levels manager and the Project units dialog.
     levels: levelsui::LevelsUi,
     marks: marksui::MarksUi,
+    /// The Site layers editor: linked GeoPackages and the location.
+    site: siteui::SiteUi,
     gstyles: stylesui::StylesUi,
     /// The Copy to levels and Move to level windows.
     level_copy: levelcopy::LevelCopyUi,
@@ -471,6 +475,7 @@ impl CreaBimApp {
             ifc_dialog: false,
             new_project_classic: false,
             marks: Default::default(),
+            site: Default::default(),
             gstyles: Default::default(),
             level_copy: Default::default(),
             import_report: None,
@@ -11515,10 +11520,12 @@ impl eframe::App for CreaBimApp {
         self.note_editor_window(&ctx);
         self.ifc_export_window(&ctx);
         self.reference_steps();
+        self.site_steps();
         self.calibrate_window(&ctx);
         self.sheets_export_window(&ctx);
         self.new_project_window(&ctx);
         self.marks_window(&ctx);
+        self.site_window(&ctx);
         self.graphic_styles_window(&ctx);
         self.ground_spacing_window(&ctx);
         self.import_report_window(&ctx);

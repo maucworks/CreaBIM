@@ -210,6 +210,45 @@ impl ProjectInfo {
     }
 }
 
+/// A compass direction a picked line is to point in the model.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Cardinal {
+    #[default]
+    North,
+    East,
+    South,
+    West,
+}
+
+impl Cardinal {
+    /// The four of them, for menus.
+    pub const ALL: [Cardinal; 4] = [
+        Cardinal::North,
+        Cardinal::East,
+        Cardinal::South,
+        Cardinal::West,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Cardinal::North => "North",
+            Cardinal::East => "East",
+            Cardinal::South => "South",
+            Cardinal::West => "West",
+        }
+    }
+
+    /// Its model-space angle, degrees from the +X axis.
+    pub fn angle_deg(self) -> f64 {
+        match self {
+            Cardinal::North => 90.0,
+            Cardinal::East => 0.0,
+            Cardinal::South => -90.0,
+            Cardinal::West => 180.0,
+        }
+    }
+}
+
 /// Where a project sits on the map: the CRS, the model origin in it,
 /// the turn from model-up to grid north, and the height of project
 /// zero above sea level. One rigid transform for the whole project
@@ -246,6 +285,30 @@ impl GeoPlacement {
         let (c, s) = (t.cos(), t.sin());
         let (dx, dy) = (world.x - self.easting, world.y - self.northing);
         DVec2::new(dx * c - dy * s, dx * s + dy * c)
+    }
+
+    /// The same placement with its origin at `world`: that map point
+    /// becomes model (0,0) — "call this parcel corner zero".
+    pub fn with_origin_at(&self, world: DVec2) -> Self {
+        Self {
+            easting: world.x,
+            northing: world.y,
+            ..self.clone()
+        }
+    }
+
+    /// The rotation that makes a direction that is `world_dir` on the
+    /// map point `to` in the model: pick a line of the geography, and
+    /// the project turns until it runs north, east, south or west. None
+    /// for a zero-length direction.
+    pub fn rotation_towards(&self, world_dir: DVec2, to: Cardinal) -> Option<f64> {
+        if !world_dir.is_finite() || world_dir.length_squared() < 1e-18 {
+            return None;
+        }
+        let want = to.angle_deg();
+        let have = world_dir.y.atan2(world_dir.x).to_degrees();
+        let d = (want - have).rem_euclid(360.0);
+        Some(if d > 180.0 { d - 360.0 } else { d })
     }
 
     /// `(eastings, northings, height, x_abscissa, x_ordinate)` for
@@ -403,6 +466,46 @@ mod tests {
         let mut p = placed();
         p.northing = None;
         assert!(p.placement().is_none());
+    }
+
+    #[test]
+    fn a_picked_line_points_the_way_it_is_called() {
+        use glam::DVec2;
+        let g = placed().placement().unwrap();
+        // a map-north road called North stays as it is
+        let t = g.rotation_towards(DVec2::new(0.0, 1.0), Cardinal::North);
+        assert!((t.unwrap()).abs() < 1e-9);
+        // the same road called East turns the project −90°
+        let t = g.rotation_towards(DVec2::new(0.0, 1.0), Cardinal::East).unwrap();
+        assert!((t + 90.0).abs() < 1e-9);
+        // and after that turn, the model really sees it running east:
+        // the model direction is the rotation applied to the world one
+        let (c, s) = (t.to_radians().cos(), t.to_radians().sin());
+        let model = DVec2::new(0.0 * c - 1.0 * s, 0.0 * s + 1.0 * c);
+        assert!((model.x - 1.0).abs() < 1e-9 && model.y.abs() < 1e-9);
+        // an east-west line called South
+        let t = g.rotation_towards(DVec2::new(1.0, 0.0), Cardinal::South).unwrap();
+        assert!((t + 90.0).abs() < 1e-9);
+        // with the project already turned, the current rotation counts
+        let mut p = placed();
+        p.true_north = 90.0;
+        let g = p.placement().unwrap();
+        // world east already points north there: the rotation stays 90
+        let t = g.rotation_towards(DVec2::new(1.0, 0.0), Cardinal::North).unwrap();
+        assert!((t - 90.0).abs() < 1e-9, "got {t}");
+        // zero length asks for nothing
+        assert!(g.rotation_towards(DVec2::ZERO, Cardinal::North).is_none());
+    }
+
+    #[test]
+    fn zeroing_puts_a_picked_point_at_the_origin() {
+        use glam::DVec2;
+        let g = placed().placement().unwrap();
+        let at = DVec2::new(136334.0, 455990.0);
+        let zeroed = g.with_origin_at(at);
+        assert_eq!(zeroed.srid, g.srid);
+        assert_eq!(zeroed.rotation_deg, g.rotation_deg);
+        assert!(zeroed.model_of(at).distance(DVec2::ZERO) < 1e-9);
     }
 
     #[test]

@@ -7,8 +7,10 @@
 //! reload from disc, and unlink.
 
 use super::gridvis::VisTarget;
+use super::planview::{SitePick, SitePickHit};
 use super::*;
-use creabim_core::{GeoPlacement, SiteFeature, SiteGeometry};
+use creabim_core::{Cardinal, LayerStyle, ProjectInfo, SiteGeometry};
+use creabim_core::styles::{LinePattern, Rgb};
 
 /// One linked file's layers, grouped for the editor.
 pub struct SitePackage {
@@ -22,6 +24,8 @@ pub struct SiteLayer {
     pub category: String,
     pub features: usize,
     pub area: f64,
+    /// How it draws, project-wide: what the editor's widgets sit on.
+    pub style: LayerStyle,
 }
 
 /// The linked packages in the model, layers in model order.
@@ -47,6 +51,7 @@ pub fn site_packages(model: &Model) -> Vec<SitePackage> {
             category: format!("{:?}", s.category),
             features: s.features.len(),
             area: s.area(),
+            style: s.style.clone(),
         });
     }
     out
@@ -66,6 +71,175 @@ impl CreaBimApp {
         self.site.open = true;
         self.site.shift = [0.0, 0.0];
         self.site.turn = 0.0;
+    }
+
+    /// One layer's style, written under a `site …` label: the only
+    /// writes the commit guard lets through for linked layers.
+    fn apply_layer_style(&mut self, id: ElementId, style: LayerStyle) {
+        let Some(e) = self.doc.model().get(id).cloned() else {
+            return;
+        };
+        let mut after = e.clone();
+        if let ElementKind::SiteFeature(s) = &mut after.kind {
+            s.style = style;
+        }
+        let file = e
+            .source
+            .as_ref()
+            .map(|s| stem(&s.file).to_string())
+            .unwrap_or_default();
+        let tx = creabim_core::Transaction::new(format!("site style {file}"))
+            .replace(e, after);
+        let r = self.doc.commit(tx);
+        self.report(r, "Layer style set: it draws so in every view.".to_string());
+    }
+
+    /// A GeoPackage picked in the file dialog joins the project: the
+    /// project takes the file's CRS when it has no location yet (the
+    /// origin starts at the extent's middle), the layers load onto it,
+    /// and picking finishes the placement.
+    fn link_geopackage(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("GeoPackage", &["gpkg"])
+            .pick_file()
+        else {
+            return;
+        };
+        let path = path.to_string_lossy().into_owned();
+        if self.doc.model().iter().any(|e| {
+            matches!(&e.kind, ElementKind::SiteFeature(_))
+                && e.source.as_ref().is_some_and(|s| s.file == path)
+        }) {
+            self.status = format!("{} is already linked.", stem(&path));
+            return;
+        }
+        let geo = match creabim_exchange::site::file_geo(&path) {
+            Ok(g) => g,
+            Err(e) => {
+                self.status = format!("Site link failed: {e}");
+                return;
+            }
+        };
+        let info = self
+            .doc
+            .model()
+            .project_info()
+            .map(|(_, p)| p.clone());
+        let Some(info) = info else {
+            self.status = "The project has no project information element yet.".into();
+            return;
+        };
+        match info.placement() {
+            None => {
+                let (cx, cy) = geo
+                    .bounds
+                    .map(|(x0, y0, x1, y1)| ((x0 + x1) / 2.0, (y0 + y1) / 2.0))
+                    .unwrap_or((0.0, 0.0));
+                let placed = ProjectInfo {
+                    srid: Some(geo.crs.clone()),
+                    easting: Some(cx),
+                    northing: Some(cy),
+                    ..info.clone()
+                };
+                let tx = creabim_core::set_project(self.doc.model(), placed);
+                let stem = stem(&path).to_string();
+                let crs = geo.crs.clone();
+                let ok = self.doc.commit(tx).is_ok();
+                self.status = if ok {
+                    format!("{stem} linked: the project is placed in {crs} at the extent's middle. Pick zero and a north line to finish.")
+                } else {
+                    format!("{stem} linked but project placement would not commit.")
+                };
+            }
+            Some(p) if p.srid != geo.crs => {
+                self.status = format!(
+                    "Site link failed: {} is in {}, the project is placed in {}. Reprojecting on load is out.",
+                    stem(&path),
+                    geo.crs,
+                    p.srid
+                );
+                return;
+            }
+            Some(_) => {}
+        }
+        self.reload_site_package(&path);
+    }
+
+    /// The site editor's picks, applied: the picked point becomes the
+    /// origin, the picked line turns the project to point the cardinal
+    /// it was called; every linked layer re-projects onto the new
+    /// placement at once, so site and GIS stay synched.
+    pub(super) fn site_steps(&mut self) {
+        let Some(hit) = self.plan.site_picked.take() else {
+            return;
+        };
+        let info = self
+            .doc
+            .model()
+            .project_info()
+            .map(|(_, p)| p.clone());
+        let Some(info) = info else {
+            self.status = "The project has no location: link a GeoPackage first.".into();
+            return;
+        };
+        let Some(placement) = info.placement() else {
+            self.status = "The project has no location: link a GeoPackage first.".into();
+            return;
+        };
+        let (after, said) = match hit {
+            SitePickHit::Zero(p) => {
+                let world = placement.world_of(p);
+                (
+                    ProjectInfo {
+                        easting: Some(world.x),
+                        northing: Some(world.y),
+                        ..info.clone()
+                    },
+                    format!(
+                        "Zero set: the picked point is model (0,0) from E {:.2}, N {:.2}. The layers re-project onto it.",
+                        world.x, world.y
+                    ),
+                )
+            }
+            SitePickHit::Line(cardinal, a, b) => {
+                let d = b - a;
+                let world =
+                    placement.world_of(d) - placement.world_of(DVec2::ZERO);
+                let Some(rot) = placement.rotation_towards(world, cardinal) else {
+                    self.status = "Site pick failed: the picked line has no direction.".into();
+                    return;
+                };
+                (
+                    ProjectInfo {
+                        true_north: rot,
+                        ..info.clone()
+                    },
+                    format!(
+                        "North line set: the picked line runs {} now, the project turned to {rot:.2}°. The layers re-project with it.",
+                        cardinal.label().to_lowercase()
+                    ),
+                )
+            }
+        };
+        let tx = creabim_core::set_project(self.doc.model(), after);
+        if self.doc.commit(tx).is_ok() {
+            self.status = said;
+            let mut files: Vec<String> = self
+                .doc
+                .model()
+                .iter()
+                .filter_map(|e| {
+                    matches!(&e.kind, ElementKind::SiteFeature(_))
+                        .then(|| e.source.as_ref().map(|s| s.file.clone()))
+                        .flatten()
+                })
+                .collect();
+            files.sort();
+            files.dedup();
+            for f in files {
+                self.reload_site_package(&f);
+            }
+        }
     }
 
     /// Where visibility toggles go: the active view, or the 3D window.
@@ -100,7 +274,7 @@ impl CreaBimApp {
         let file = file.to_string();
         let mut tx = creabim_core::Transaction::new(format!("site move {}", stem(&file)));
         for e in self.doc.model().iter() {
-            let (ElementKind::SiteFeature(s), Some(src)) = (&e.kind, &e.source) else {
+            let (ElementKind::SiteFeature(_), Some(src)) = (&e.kind, &e.source) else {
                 continue;
             };
             if src.file != file {
@@ -182,16 +356,23 @@ impl CreaBimApp {
         match creabim_exchange::site::sync_site(self.doc.model(), &file, &g) {
             Ok((tx, report)) => {
                 let r = self.doc.commit(tx);
-                self.report(
-                    r,
-                    format!(
-                        "Site {}: {} added, {} updated, {} removed.",
-                        stem(&file),
-                        report.added,
-                        report.updated,
-                        report.removed
-                    ),
+                let mut said = format!(
+                    "Site {}: {} added, {} updated, {} removed.",
+                    stem(&file),
+                    report.added,
+                    report.updated,
+                    report.removed
                 );
+                if !report.skipped_layers.is_empty() {
+                    said += &format!(
+                        " Skipped: {}.",
+                        report.skipped_layers.join("; ")
+                    );
+                }
+                for n in &report.notes {
+                    said += &format!(" {n}");
+                }
+                self.report(r, said);
             }
             Err(e) => {
                 self.status = format!("Site reload failed: {e}");
@@ -214,14 +395,17 @@ impl CreaBimApp {
         self.report(r, format!("Site {} unlinked.", stem(&file)));
     }
 
-    /// The editor window: one package section per linked file.
+    /// The editor window: the project's location, one package section
+    /// per linked file, its layers editable.
     pub(super) fn site_window(&mut self, ctx: &egui::Context) {
         let mut open = self.site.open;
-        let mut force = None;
         let mut reload = None;
         let mut unlink = None;
         let mut shift: Option<(String, f64, f64)> = None;
         let mut turn: Option<(String, f64)> = None;
+        let mut link = false;
+        let mut style_edits: Vec<(ElementId, LayerStyle)> = vec![];
+        let mut pick: Option<SitePick> = None;
         crate::app::shell::window("Site layers")
             .open(&mut open)
             .show(ctx, |ui| {
@@ -231,9 +415,65 @@ impl CreaBimApp {
                     )
                     .weak(),
                 );
-                let target = self.site_target();
-                let target_name = self.site_target_name();
-                for pkg in site_packages(self.doc.model()) {
+                if ui.button("Link GeoPackage…").clicked() {
+                    link = true;
+                }
+                // The project's location: what every linked file and the
+                // model share — one origin, one north.
+                match self.doc.model().project_info().and_then(|(_, p)| p.placement()) {
+                    Some(g) => {
+                        ui.separator();
+                        ui.heading("Location");
+                        ui.label(format!(
+                            "{} · origin E {:.2}, N {:.2} · north turned {:.1}°",
+                            g.srid, g.easting, g.northing, g.rotation_deg
+                        ));
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button("Set zero: pick a point…")
+                                .on_hover_text("Click a point of the geography on a plan; it becomes the model origin (0,0), and every layer re-projects onto it.")
+                                .clicked()
+                            {
+                                pick = Some(SitePick::Zero);
+                            }
+                            ui.label("North line:");
+                            for c in Cardinal::ALL {
+                                let letter = match c {
+                                    Cardinal::North => "N",
+                                    Cardinal::East => "E",
+                                    Cardinal::South => "S",
+                                    Cardinal::West => "W",
+                                };
+                                if ui
+                                    .small_button(letter)
+                                    .on_hover_text(format!(
+                                        "Pick a line of the geography; the project turns until it runs {}.",
+                                        c.label().to_lowercase()
+                                    ))
+                                    .clicked()
+                                {
+                                    pick = Some(SitePick::Line(c));
+                                }
+                            }
+                        });
+                        ui.label(
+                            egui::RichText::new(
+                                "Picks read the layers as last loaded; Reload first if you moved the location by hand.",
+                            )
+                            .weak(),
+                        );
+                    }
+                    None => {
+                        ui.label(
+                            egui::RichText::new(
+                                "The project has no location yet: linking a GeoPackage places it in the file's CRS.",
+                            )
+                            .weak(),
+                        );
+                    }
+                }
+                let mut packages = site_packages(self.doc.model());
+                for pkg in &mut packages {
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.heading(stem(&pkg.file));
@@ -282,16 +522,21 @@ impl CreaBimApp {
                             turn = Some((pkg.file.clone(), self.site.turn));
                         }
                     });
-                    ui.label(format!("Eye toggles hide in {target_name}."));
-                    for l in &pkg.layers {
+                    ui.label(format!("Eye toggles hide in {}.", self.site_target_name()));
+                    for l in &mut pkg.layers {
                         ui.horizontal(|ui| {
+                            let target = self.site_target();
                             let hidden = target.is_some_and(|t| {
                                 self.view_hidden(t).is_some_and(|h| {
-                                    h.elements.iter().any(|id| *id == l.id)
+                                    h.elements.contains(&l.id)
                                 })
                             });
                             let mut eye = !hidden;
-                            if ui.checkbox(&mut eye, "").clicked() {
+                            if ui
+                                .checkbox(&mut eye, "")
+                                .on_hover_text("Hide in the active view (or the 3D window) only")
+                                .clicked()
+                            {
                                 if let Some(t) = target {
                                     let id = l.id;
                                     let name = l.name.clone();
@@ -300,18 +545,98 @@ impl CreaBimApp {
                                     });
                                 }
                             }
+                            if ui
+                                .checkbox(&mut l.style.visible, "")
+                                .on_hover_text("Show the layer in every view (the project's own visibility)")
+                                .changed()
+                            {
+                                style_edits.push((l.id, l.style.clone()));
+                            }
                             ui.label(format!(
                                 "{} · {} · {} · {:.0} m²",
                                 l.name, l.category, l.features, l.area
                             ));
                         });
+                        ui.horizontal(|ui| {
+                            ui.label("Fill");
+                            let mut fill = srgb(l.style.fill);
+                            if ui
+                                .color_edit_button_srgb(&mut fill)
+                                .on_hover_text("The colour under the category's hatch")
+                                .changed()
+                            {
+                                l.style.fill = rgb(fill);
+                                style_edits.push((l.id, l.style.clone()));
+                            }
+                            ui.label("Line");
+                            let mut line = srgb(l.style.line);
+                            if ui
+                                .color_edit_button_srgb(&mut line)
+                                .on_hover_text("The outlines' and polylines' colour")
+                                .changed()
+                            {
+                                l.style.line = rgb(line);
+                                style_edits.push((l.id, l.style.clone()));
+                            }
+                            ui.label("Line type");
+                            let mut pattern = l.style.pattern.clone();
+                            egui::ComboBox::from_id_salt(("site.line", l.id))
+                                .selected_text(
+                                    pattern
+                                        .as_ref()
+                                        .map_or("Pen".to_string(), |p| p.label().to_string()),
+                                )
+                                .width(80.0)
+                                .show_ui(ui, |ui| {
+                                    if ui.selectable_label(pattern.is_none(), "Pen").clicked() {
+                                        pattern = None;
+                                    }
+                                    for p in LinePattern::NAMED {
+                                        if matches!(p, LinePattern::Custom(_)) {
+                                            continue;
+                                        }
+                                        if ui
+                                            .selectable_label(
+                                                pattern.as_ref() == Some(&p),
+                                                p.label(),
+                                            )
+                                            .clicked()
+                                        {
+                                            pattern = Some(p);
+                                        }
+                                    }
+                                });
+                            if pattern != l.style.pattern {
+                                l.style.pattern = pattern;
+                                style_edits.push((l.id, l.style.clone()));
+                            }
+                        });
                     }
-                    let _ = force;
                 }
-                if site_packages(self.doc.model()).is_empty() {
-                    ui.label("No linked site layers. Link a GeoPackage with `site load`.");
+                if packages.is_empty() {
+                    ui.label("No linked site layers. Link a GeoPackage above.");
                 }
             });
+        if link {
+            self.link_geopackage();
+        }
+        for (id, style) in style_edits {
+            self.apply_layer_style(id, style);
+        }
+        if let Some(p) = pick {
+            self.plan.site_pick = Some(p);
+            self.plan.align_ref = None;
+            self.plan.calibrate = None;
+            self.status = match p {
+                SitePick::Zero => {
+                    "Set zero: click a point of the geography on the plan.".into()
+                }
+                SitePick::Line(c) => format!(
+                    "Point the line: click a line of the geography, it is to run {}.",
+                    c.label().to_lowercase()
+                ),
+            };
+        }
         if let Some(file) = reload {
             self.reload_site_package(&file);
         }
@@ -326,6 +651,18 @@ impl CreaBimApp {
         }
         self.site.open = open;
     }
+}
+
+/// sRGB 0..1 to the picker's bytes; none reads white.
+fn srgb(c: Option<Rgb>) -> [u8; 3] {
+    c.map_or([255, 255, 255], |c| {
+        c.0.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+    })
+}
+
+/// The picker's bytes back to sRGB 0..1.
+fn rgb(b: [u8; 3]) -> Option<Rgb> {
+    Some(Rgb(b.map(|v| v as f32 / 255.0)))
 }
 
 /// File name without folders, for headers and undo labels.

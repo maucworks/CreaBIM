@@ -1343,8 +1343,9 @@ pub fn plan_view_with(
             // loaded map layers draw on every plan: filled polygons in
             // the category's hatch, outlines over them, polylines as
             // light projection lines. V1 has no cut/range test — site
-            // geometry is flat at project zero.
-            ElementKind::SiteFeature(s) => {
+            // geometry is flat at project zero. The layer's own style
+            // colours the fill and hides it project-wide.
+            ElementKind::SiteFeature(s) if s.style.visible => {
                 for f in &s.features {
                     match &f.geom {
                         creabim_core::SiteGeometry::Polygon { exterior, holes } => {
@@ -1352,7 +1353,7 @@ pub fn plan_view_with(
                                 id: e.id,
                                 points: exterior.clone(),
                                 hatch: s.category.hatch(),
-                                rgb: None,
+                                rgb: s.style.fill.map(|c| c.0),
                             });
                             items.push(PlanItem::Polygon {
                                 id: e.id,

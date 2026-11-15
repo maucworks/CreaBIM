@@ -510,7 +510,10 @@ fn build_scene_unjoined(
                 // ghosted (translucent underlay in 3D, still clickable),
                 // left out of drawings and exports — the plan draws the
                 // true vectors instead. Polylines have no mesh form and
-                // stay plan-only for now.
+                // stay plan-only for now. Hidden layers draw nowhere.
+                if !s.style.visible {
+                    continue;
+                }
                 for f in &s.features {
                     let exterior = match &f.geom {
                         creabim_core::SiteGeometry::Polygon { exterior, holes } => {
