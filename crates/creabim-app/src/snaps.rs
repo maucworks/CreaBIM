@@ -695,8 +695,8 @@ impl Snapper {
             }
         }
         for g in (0..n).filter(|i| guide(&self.segments[*i])) {
-            for (j, seg) in self.segments.iter().enumerate().take(n) {
-                if j != g && (!guide(seg) || j > g) {
+            for (j, t) in self.segments.iter().enumerate().take(n) {
+                if j != g && (!guide(t) || j > g) {
                     pairs.push((g.min(j), g.max(j)));
                 }
             }

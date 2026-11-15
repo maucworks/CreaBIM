@@ -6,10 +6,269 @@ use super::*;
 use crate::ui_model::Item;
 use creabim_core::{LengthUnit, Units};
 
+/// The Save the changes window (REV02): where it is.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) enum CloseState {
+    /// Save, Don't save or Cancel?
+    #[default]
+    Ask,
+    /// Save was pressed: the button spins until the file is written.
+    Saving {
+        since: std::time::Instant,
+        /// The file is written (or not), once tried.
+        done: Option<Result<(), String>>,
+        /// It failed before with this: Save as… goes elsewhere.
+        retry: Option<String>,
+    },
+    /// Saved: the nest settles, then CreaBIM closes.
+    Saved(std::time::Instant),
+    /// The save failed, for this reason; nothing closes.
+    Failed(String),
+}
+
+/// How long Save spins at least, so it is seen, and how long "Saved."
+/// holds before CreaBIM closes (the page fades out in its last 0.3 s).
+const SAVING_AT_LEAST: std::time::Duration = std::time::Duration::from_millis(450);
+const SAVED_HOLDS: std::time::Duration = std::time::Duration::from_millis(1200);
+
+/// "just now", "4 minutes ago", "2 hours ago", "3 days ago".
+pub(crate) fn ago(d: std::time::Duration) -> String {
+    let s = d.as_secs();
+    let (n, unit) = match s {
+        0..60 => return "just now".into(),
+        60..3600 => (s / 60, "minute"),
+        3600..172_800 => (s / 3600, "hour"),
+        _ => (s / 86_400, "day"),
+    };
+    format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
+}
+
+/// The Save the changes window's line under its title.
+pub(crate) fn changes_line(n: usize, since: Option<std::time::Duration>) -> String {
+    let changes = format!("{n} change{}", if n == 1 { "" } else { "s" });
+    match since {
+        Some(d) => format!("{changes} since it was last saved, {}.", ago(d)),
+        None => format!("{changes} since it was last saved."),
+    }
+}
+
+/// Why a save failed, in plain words, from the system's message.
+pub(crate) fn save_error(e: &str) -> String {
+    let l = e.to_ascii_lowercase();
+    let any = |words: &[&str]| words.iter().any(|w| l.contains(w));
+    if any(&[
+        "os error 5)",
+        "os error 19)",
+        "os error 30)",
+        "os error 13)",
+        "access is denied",
+        "permission denied",
+        "read-only",
+        "write-protected",
+    ]) {
+        "The file or its folder is read-only, or CreaBIM isn't allowed to write there. Choose another folder with Save as…".into()
+    } else if any(&[
+        "os error 112)",
+        "os error 28)",
+        "no space",
+        "disk is full",
+        "not enough space",
+    ]) {
+        "The disk is full. Free some space, or choose another drive with Save as…".into()
+    } else {
+        format!("The file couldn't be written ({e}). Choose another folder with Save as…")
+    }
+}
+
 impl CreaBimApp {
-    /// Closing with unsaved changes: Save, Don't save or Cancel.
+    /// The project has no file yet: Save asks where.
+    fn never_saved(&self) -> bool {
+        !std::path::Path::new(&self.path).exists()
+    }
+
+    /// The Save the changes window's state, for its page.
+    pub(super) fn close_state_json(&self) -> serde_json::Value {
+        let file = std::path::Path::new(&self.path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("project.creabim")
+            .to_string();
+        let fresh = self.never_saved()
+            && !matches!(self.close_state, CloseState::Saved(_))
+            && !matches!(
+                &self.close_state,
+                CloseState::Saving {
+                    done: Some(Ok(())),
+                    ..
+                }
+            );
+        let since = std::fs::metadata(&self.path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| std::time::SystemTime::now().duration_since(t).ok());
+        let (phase, error) = match &self.close_state {
+            CloseState::Ask => ("ask", None),
+            CloseState::Saving { retry, .. } => ("saving", retry.clone()),
+            CloseState::Saved(_) => ("saved", None),
+            CloseState::Failed(e) => ("failed", Some(e.clone())),
+        };
+        serde_json::json!({
+            "phase": phase,
+            "file": file,
+            "fresh": fresh,
+            "line": if fresh {
+                "It hasn't been saved to a file yet.".to_string()
+            } else {
+                changes_line(self.changes_since_saved(), since)
+            },
+            "error": error,
+        })
+    }
+
+    /// A button or key of the Save the changes window: save, discard or
+    /// cancel.
+    pub(super) fn close_do(&mut self, ctx: &egui::Context, what: &str) {
+        crate::actlog::line(format!("close: {what}"));
+        if !self.close_ask {
+            return;
+        }
+        let busy = matches!(
+            self.close_state,
+            CloseState::Saving { .. } | CloseState::Saved(_)
+        );
+        match what {
+            "save" if !busy => {
+                let retry = match &self.close_state {
+                    CloseState::Failed(e) => Some(e.clone()),
+                    _ => None,
+                };
+                self.close_state = CloseState::Saving {
+                    since: std::time::Instant::now(),
+                    done: None,
+                    retry,
+                };
+                ctx.request_repaint();
+            }
+            "discard" if !busy => self.close_now(ctx),
+            "cancel" if !busy => {
+                self.close_ask = false;
+                self.close_state = CloseState::Ask;
+                self.hide_close_dialog();
+                self.status = "Close cancelled: the project is still open.".into();
+            }
+            _ => {}
+        }
+    }
+
+    /// Let the close through: saved, or the changes let go.
+    fn close_now(&mut self, ctx: &egui::Context) {
+        self.close_ask = false;
+        self.close_state = CloseState::Ask;
+        self.hide_close_dialog();
+        self.close_ok = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// Saving, then saved, then closed: one step a frame.
+    fn close_step(&mut self, ctx: &egui::Context) {
+        let soon = std::time::Duration::from_millis(40);
+        match self.close_state.clone() {
+            CloseState::Saving {
+                since,
+                done: None,
+                retry,
+            } => {
+                // a frame first, so the page shows Saving… before the
+                // save holds the app (and a file picker opens over it)
+                if since.elapsed() < soon {
+                    ctx.request_repaint_after(soon);
+                    return;
+                }
+                let r = if self.never_saved() || retry.is_some() {
+                    let start = with_extension(&self.path, "creabim");
+                    match crate::files::pick_save(&start, "Save the project as", "creabim") {
+                        Some(path) => {
+                            let was = std::mem::replace(&mut self.path, path);
+                            let r = self.save_file();
+                            if r.is_err() {
+                                self.path = was;
+                            }
+                            Some(r)
+                        }
+                        // Save as cancelled: back to the question
+                        None => None,
+                    }
+                } else {
+                    Some(self.save_file())
+                };
+                crate::actlog::line(match &r {
+                    None => "close: Save as cancelled".to_string(),
+                    Some(Ok(())) => format!("close: saved {}", self.path),
+                    Some(Err(e)) => format!("close: couldn't save {}: {e}", self.path),
+                });
+                self.close_state = match r {
+                    None => retry.map_or(CloseState::Ask, CloseState::Failed),
+                    Some(Err(e)) => {
+                        self.status = format!("Couldn't save {}: {e}", self.path);
+                        CloseState::Failed(save_error(&e))
+                    }
+                    Some(Ok(())) => {
+                        self.status = format!("Saved {}", self.path);
+                        CloseState::Saving {
+                            since,
+                            done: Some(Ok(())),
+                            retry: None,
+                        }
+                    }
+                };
+                ctx.request_repaint();
+            }
+            CloseState::Saving { since, .. } => {
+                if since.elapsed() >= SAVING_AT_LEAST {
+                    self.close_state = CloseState::Saved(std::time::Instant::now());
+                }
+                ctx.request_repaint_after(soon);
+            }
+            CloseState::Saved(at) => {
+                if at.elapsed() >= SAVED_HOLDS {
+                    self.close_now(ctx);
+                } else {
+                    ctx.request_repaint_after(soon);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Closing with unsaved changes: Save, Don't save or Cancel. The web
+    /// window of REV02 where the pages are; the plain one otherwise.
     pub(super) fn close_window(&mut self, ctx: &egui::Context) {
         if !self.close_ask {
+            return;
+        }
+        if self.shell.web.is_some() {
+            self.show_close_dialog(ctx);
+            // the project behind waits: nothing in it can be clicked. Not
+            // dimmed: the web panes can't be, and half a shade looks broken
+            egui::Modal::new(egui::Id::new("close-unsaved"))
+                .frame(egui::Frame::NONE)
+                .backdrop_color(egui::Color32::TRANSPARENT)
+                .show(ctx, |_| {});
+            // the keys, while the views have the keyboard
+            if matches!(self.close_state, CloseState::Ask | CloseState::Failed(_)) {
+                let (enter, esc) = ctx.input(|i| {
+                    (
+                        i.key_pressed(egui::Key::Enter),
+                        i.key_pressed(egui::Key::Escape),
+                    )
+                });
+                if enter {
+                    self.close_do(ctx, "save");
+                } else if esc {
+                    self.close_do(ctx, "cancel");
+                }
+            }
+            self.close_step(ctx);
             return;
         }
         let name = std::path::Path::new(&self.path)
@@ -917,6 +1176,164 @@ pub(crate) fn logo_texture(ctx: &egui::Context) -> egui::TextureHandle {
         )
     })
     .clone()
+}
+
+#[cfg(test)]
+mod close_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// One edit, as a user's: a copy of a material, one undo step.
+    fn edit(app: &mut CreaBimApp, name: &str) {
+        let kind = app
+            .doc
+            .model()
+            .iter()
+            .find(|e| matches!(e.kind, ElementKind::Material(_)))
+            .unwrap()
+            .kind
+            .clone();
+        let e = creabim_core::Element::new(name, kind);
+        app.doc
+            .commit(creabim_core::Transaction::new(format!("Add {name}")).insert(e))
+            .unwrap();
+    }
+
+    fn saved_app(tag: &str) -> (CreaBimApp, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("creabim-close-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = test_app();
+        app.path = dir.join("Terrace house.creabim").display().to_string();
+        app.save_file().unwrap();
+        (app, dir)
+    }
+
+    #[test]
+    fn the_line_says_how_many_changes_and_how_long_ago() {
+        assert_eq!(ago(Duration::from_secs(20)), "just now");
+        assert_eq!(ago(Duration::from_secs(60)), "1 minute ago");
+        assert_eq!(ago(Duration::from_secs(4 * 60 + 30)), "4 minutes ago");
+        assert_eq!(ago(Duration::from_secs(2 * 3600)), "2 hours ago");
+        assert_eq!(ago(Duration::from_secs(3 * 86_400)), "3 days ago");
+        assert_eq!(
+            changes_line(23, Some(Duration::from_secs(18 * 60))),
+            "23 changes since it was last saved, 18 minutes ago."
+        );
+        assert_eq!(
+            changes_line(1, Some(Duration::from_secs(5))),
+            "1 change since it was last saved, just now."
+        );
+    }
+
+    #[test]
+    fn a_failed_save_says_why_in_plain_words() {
+        assert!(save_error("Access is denied. (os error 5)").contains("read-only"));
+        assert!(save_error("Read-only file system (os error 30)").contains("read-only"));
+        assert!(
+            save_error("There is not enough space on the disk. (os error 112)")
+                .contains("disk is full")
+        );
+        assert!(save_error("something odd").contains("something odd"));
+    }
+
+    #[test]
+    fn the_changes_are_counted_in_undo_steps_since_the_save() {
+        let (mut app, dir) = saved_app("count");
+        assert_eq!(app.changes_since_saved(), 0);
+        edit(&mut app, "A");
+        edit(&mut app, "B");
+        edit(&mut app, "C");
+        assert_eq!(app.changes_since_saved(), 3);
+        app.doc.undo();
+        assert_eq!(app.changes_since_saved(), 2);
+        let s = app.close_state_json();
+        assert_eq!(s["fresh"], false);
+        assert_eq!(s["file"], "Terrace house.creabim");
+        assert!(s["line"]
+            .as_str()
+            .unwrap()
+            .starts_with("2 changes since it was last saved, just now"));
+        app.save_file().unwrap();
+        assert_eq!(app.changes_since_saved(), 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn save_spins_then_settles_then_closes() {
+        let ctx = egui::Context::default();
+        let (mut app, dir) = saved_app("save");
+        edit(&mut app, "A");
+        app.close_ask = true;
+        app.close_do(&ctx, "save");
+        assert_eq!(app.close_state_json()["phase"], "saving");
+        // the page gets a frame to show Saving… first
+        app.close_step(&ctx);
+        assert!(app.unsaved());
+        std::thread::sleep(Duration::from_millis(60));
+        app.close_step(&ctx);
+        assert!(!app.unsaved(), "written");
+        assert_eq!(
+            app.close_state_json()["phase"],
+            "saving",
+            "it spins a moment"
+        );
+        std::thread::sleep(SAVING_AT_LEAST);
+        app.close_step(&ctx);
+        assert_eq!(app.close_state_json()["phase"], "saved");
+        assert!(!app.close_ok);
+        std::thread::sleep(SAVED_HOLDS);
+        app.close_step(&ctx);
+        assert!(app.close_ok && !app.close_ask, "then CreaBIM closes");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_failed_save_keeps_the_project_open_and_offers_save_as() {
+        let ctx = egui::Context::default();
+        let (mut app, dir) = saved_app("fail");
+        edit(&mut app, "A");
+        // a folder where the file should be: nothing can be written there
+        let blocked = dir.join("blocked.creabim");
+        std::fs::create_dir_all(&blocked).unwrap();
+        app.path = blocked.display().to_string();
+        app.close_ask = true;
+        app.close_do(&ctx, "save");
+        std::thread::sleep(Duration::from_millis(60));
+        app.close_step(&ctx);
+        let s = app.close_state_json();
+        assert_eq!(s["phase"], "failed");
+        assert!(!s["error"].as_str().unwrap().is_empty());
+        assert!(app.close_ask && !app.close_ok && app.unsaved());
+        // Don't save still lets go; Cancel keeps it open
+        app.close_do(&ctx, "cancel");
+        assert!(!app.close_ask && !app.close_ok);
+        assert_eq!(app.status, "Close cancelled: the project is still open.");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_project_with_no_file_asks_for_a_new_one() {
+        let mut app = test_app();
+        app.path = std::env::temp_dir()
+            .join("creabim-never-saved-here/project.creabim")
+            .display()
+            .to_string();
+        edit(&mut app, "A");
+        let s = app.close_state_json();
+        assert_eq!(s["fresh"], true);
+        assert_eq!(s["line"], "It hasn't been saved to a file yet.");
+    }
+
+    #[test]
+    fn dont_save_closes_at_once() {
+        let ctx = egui::Context::default();
+        let (mut app, dir) = saved_app("discard");
+        edit(&mut app, "A");
+        app.close_ask = true;
+        app.close_do(&ctx, "discard");
+        assert!(app.close_ok && !app.close_ask && app.unsaved());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 #[cfg(test)]

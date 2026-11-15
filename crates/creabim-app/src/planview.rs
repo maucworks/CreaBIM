@@ -4291,6 +4291,21 @@ fn keyboard_edits(
         Flow::Tool
     };
     let mode = keys.or(state.armed)?;
+    // Shift+D on views copies them at once, as the Duplicate button does
+    if mode == (Mode::Move, true) {
+        if let Some(r) = modal::duplicate_views(doc, &selection.all()) {
+            state.armed = None;
+            state.status = Some(match r {
+                Ok(copies) => {
+                    let said = modal::views_duplicated(doc, &copies);
+                    selection.extend(copies, false);
+                    said
+                }
+                Err(e) => e,
+            });
+            return Some(None);
+        }
+    }
     if keys.is_none() && only_paper(doc, &selection.all()) {
         return None;
     }

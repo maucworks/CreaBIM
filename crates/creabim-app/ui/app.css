@@ -788,11 +788,15 @@ html[data-pane="popup"] body {
 
 /* ---------- command palette ---------- */
 
-.palette { display: flex; flex-direction: column; width: 100%; }
+/* No taller than its window: in a short one the list shrinks and scrolls,
+   and the search and the keys below stay in view (less the popup's
+   1px border, top and bottom). */
+.palette { display: flex; flex-direction: column; width: 100%; max-height: calc(100vh - 2px); }
+.pq, .pfoot { flex: none; }
 .pq { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--border-2); color: var(--muted); }
 .pq input { flex: 1; min-width: 0; font: inherit; font-size: 15px; color: var(--text); background: none; border: 0; outline: none; user-select: text; -webkit-user-select: text; }
 .pq input::placeholder { color: var(--faint); }
-.pl { max-height: 300px; overflow-y: auto; padding: 5px; }
+.pl { max-height: 300px; min-height: 0; overflow-y: auto; padding: 5px; }
 .pl::-webkit-scrollbar { width: 8px; }
 .pl::-webkit-scrollbar-thumb { background: var(--raise-2); border-radius: 8px; }
 .pfoot { display: flex; gap: 16px; padding: 7px 14px; border-top: 1px solid var(--border-2); color: var(--faint); font-size: 11px; }
@@ -1004,7 +1008,14 @@ kbd {
 /* ---------- New project ---------- */
 
 .np { display: flex; flex-direction: column; gap: 14px; padding: 20px 24px; height: 100%; background: var(--panel); border: 1px solid var(--border); border-radius: 0; }
-.np-head { display: flex; align-items: center; gap: 12px; }
+.np-head { display: flex; align-items: center; gap: 12px; flex: none; }
+/* The choices: they scroll when the window is too short for them, so the
+   title and the buttons below stay in reach (issue 24). */
+.np-body { display: flex; flex-direction: column; gap: 14px; flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; margin-right: -10px; padding-right: 10px; }
+.np-body > * { flex: none; }
+.np-body::-webkit-scrollbar { width: 8px; }
+.np-body::-webkit-scrollbar-thumb { background: var(--raise-2); border-radius: 8px; border: 2px solid var(--panel); }
+.np-body::-webkit-scrollbar-track { background: transparent; }
 .np-logo, .np-logo svg.mark { width: 48px; height: 48px; }
 .np-head b { font-size: 17px; font-weight: 650; flex: 1; }
 .np-esc { color: var(--muted); font-size: 12px; }
@@ -1023,7 +1034,7 @@ kbd {
 .np-big:hover, .np-sample:hover { border-color: var(--border-2); background: var(--panel-2); }
 .np-big.on, .np-sample.on { border: 1.5px solid var(--accent); background: var(--accent-soft); }
 .np-big.on .np-pic { background: var(--panel); }
-.np-foot { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; margin-top: auto; }
+.np-foot { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; margin-top: auto; flex: none; }
 .np-btn { height: 32px; padding: 0 16px; border-radius: 8px; border: 1px solid var(--border-2); color: var(--text); background: var(--panel); font-weight: 550; }
 .np-btn:hover { background: var(--raise); }
 .np-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
@@ -1126,3 +1137,98 @@ html[data-theme="solarized"] { --logo-tile: #859900; --logo-ink: #FDF6E3; }
 .bar1 .brand .logo { background: var(--logo-tile) !important; color: var(--logo-ink) !important; }
 .bar1 .brand .logo svg.mark path[stroke="#4F6B4C"] { stroke: var(--logo-ink) !important; }
 
+
+/* ---------- Save the changes (REV02 compact) ----------
+   From Mockup_Save_Changes_REV02, with the unsaved nest of the animation
+   bank (1 + 2 + 5). A web pane like New project: square, filling its
+   popup, and scrolling when the window is short (issue 24). */
+html { --danger: #f07a6a; --danger-soft: rgba(240, 122, 106, 0.14); --cs-tile: #212A41; }
+html[data-theme="light"] { --danger: #C4402F; --danger-soft: #FBE9E6; --cs-tile: #EAEFFE; }
+html[data-theme="graphite"] { --danger: #E08A74; --danger-soft: #3A2925; --cs-tile: var(--accent-soft); }
+html[data-theme="paper"] { --danger: #A4432F; --danger-soft: #F3E3DA; --cs-tile: var(--accent-soft); }
+html[data-theme="blueprint"] { --danger: #F29B8A; --danger-soft: #3A2A2E; --cs-tile: var(--accent-soft); }
+html[data-theme="sage"] { --danger: #A4432F; --danger-soft: #F6E6E1; --cs-tile: var(--accent-soft); }
+html[data-theme="solarized"] { --danger: #CB2F2C; --danger-soft: #F5E1D3; --cs-tile: var(--accent-soft); }
+html[data-theme="ink"] { --danger: #FF8A7A; --danger-soft: #3A1E1A; --cs-tile: var(--accent-soft); }
+
+/* a card with soft corners: the popup's page is clear round it (owner MU, 2026-11-12) */
+html[data-pane="popup"]:has(.cs), html[data-pane="popup"]:has(.cs) body { background: transparent; border: 0; }
+.cs { display: flex; flex-direction: column; height: 100%; box-sizing: border-box; border-radius: 14px; border: 1px solid var(--border-2); overflow: hidden; background: var(--panel-2); animation: cs-rise .32s cubic-bezier(.22,.8,.24,1) both; }
+@keyframes cs-rise { from { opacity: 0; transform: translateY(10px) scale(.985); } }
+.cs.closing { animation: cs-sink .28s .9s ease-in forwards; }
+@keyframes cs-sink { to { opacity: 0; transform: translateY(6px) scale(.985); } }
+.cs-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 18px 20px; display: grid; grid-template-columns: auto 1fr; gap: 16px; align-items: center; align-content: center; }
+.cs-body::-webkit-scrollbar { width: 8px; }
+.cs-body::-webkit-scrollbar-thumb { background: var(--raise-2); border-radius: 8px; border: 2px solid var(--panel-2); }
+.cs-body::-webkit-scrollbar-track { background: transparent; }
+.cs-tile { width: 56px; height: 56px; border-radius: 13px; background: var(--cs-tile); display: grid; place-items: center; }
+.cs h2 { margin: 0; font-size: 16.5px; font-weight: 650; line-height: 1.3; letter-spacing: -.005em; color: var(--text); }
+.cs h2 .fn { color: var(--accent-2); }
+html[data-theme="dark"] .cs h2 .fn, html[data-theme="graphite"] .cs h2 .fn,
+html[data-theme="blueprint"] .cs h2 .fn, html[data-theme="ink"] .cs h2 .fn { color: var(--logo); }
+.cs-sub { color: var(--muted); font-size: 13px; margin-top: 3px; }
+.cs-sub b { color: var(--text); font-weight: 600; }
+.cs-err { grid-column: 1 / -1; font-size: 12.5px; color: var(--danger); background: var(--danger-soft); border-radius: 9px; padding: 9px 11px; }
+.cs-foot { flex: none; display: flex; align-items: center; gap: 8px; padding: 11px 14px; background: var(--raise); border-top: 1px solid var(--border); }
+.cs-sp { flex: 1; }
+.cs-hints { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.cs-hints kbd { font-family: inherit; font-size: 10.5px; font-weight: 600; line-height: 1.5; padding: 1px 6px; border-radius: 5px; background: var(--raise); color: var(--text-2); box-shadow: inset 0 0 0 1px var(--border); border: 0; }
+.cs-btn { flex: none; font-family: inherit; font-size: 13px; font-weight: 500; height: 34px; padding: 0 14px; border-radius: 9px; border: 0; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; background: var(--raise); color: var(--text-2); box-shadow: inset 0 0 0 1px var(--border-2); transition: background .15s, color .15s, opacity .2s; }
+.cs-btn:hover { background: var(--raise-2); color: var(--text); }
+.cs-btn.primary { background: var(--accent); color: var(--on-accent); box-shadow: none; font-weight: 600; min-width: 84px; justify-content: center; }
+.cs-btn.primary:hover { background: var(--accent-2); }
+.cs-btn.primary.focus { outline: 2px solid var(--accent-ring); outline-offset: 2px; }
+.cs-btn.danger { background: transparent; color: var(--danger); box-shadow: inset 0 0 0 1px var(--border-2); padding: 0 13px; }
+.cs-btn.danger:hover { background: var(--danger-soft); }
+.cs-btn .spin { width: 13px; height: 13px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; animation: cs-spin .7s linear infinite; display: none; }
+.cs.saving .cs-btn.primary .spin { display: inline-block; }
+@keyframes cs-spin { to { transform: rotate(360deg); } }
+.cs.saving .cs-btn:not(.primary), .cs.saved .cs-btn:not(.primary) { opacity: .4; pointer-events: none; }
+.cs.saving .cs-hints, .cs.saved .cs-hints { opacity: .4; }
+.cs.saved .cs-btn.primary { background: var(--good); }
+/* words in the buttons; icons stand in for them in a narrow window */
+.cs-btn .ic { display: none; width: 16px; height: 16px; }
+.cs.saving .cs-btn.primary .ic { display: none !important; }
+@media (max-width: 440px) {
+  .cs-hints { display: none; }
+  .cs-btn .tx { display: none; }
+  .cs-btn .ic { display: block; }
+  .cs-btn, .cs-btn.danger { width: 38px; min-width: 0; padding: 0; justify-content: center; }
+  .cs-btn.primary { width: 52px; min-width: 0; }
+  .cs-body { padding: 14px; gap: 12px; }
+  .cs h2 { font-size: 15px; }
+}
+
+/* the unsaved nest (animation bank 1 + 2 + 5), in the theme's logo colour */
+.cs svg.nest { display: block; overflow: visible; color: var(--logo); }
+.cs .wm-branch { fill: none; stroke: currentColor; stroke-opacity: .75; stroke-width: 9; stroke-linecap: round; }
+.cs .wm-nest, .cs .wm-bird path { fill: currentColor; }
+.cs .wm-strand { fill: none; stroke: var(--cs-tile); stroke-width: 9; stroke-linecap: round; }
+.cs .wm-eye { fill: var(--cs-tile); }
+.cs .wm-bird, .cs .wm-dot, .cs .wm-nest, .cs .wm-strand, .cs .wm-rim { transform-box: view-box; transition: all .6s cubic-bezier(.22,.8,.24,1); }
+.cs .wm-dot { fill: var(--warn); }
+.cs .wm-shadow { fill: currentColor; opacity: .18; transform-box: fill-box; transform-origin: center; }
+.cs .wm-rim { fill: none; stroke: currentColor; stroke-width: 4; stroke-dasharray: 10 9; }
+.cs .unsaved .wm-bird { animation: cs-hover 1.6s ease-in-out infinite; }
+.cs .unsaved .wm-shadow { animation: cs-shadow 1.6s ease-in-out infinite; }
+.cs .unsaved .wm-nest { opacity: .42; transform-origin: 130px 120px; animation: cs-breathe 2.6s ease-in-out infinite; }
+.cs .unsaved .wm-strand { stroke-dasharray: 80; animation: cs-weave 2.4s ease-in-out infinite; }
+.cs .unsaved .wm-strand.s2 { animation-delay: -1.2s; }
+.cs .unsaved .wm-rim { animation: cs-march 3s linear infinite; }
+.cs .unsaved .wm-dot { transform-origin: 184px 20px; animation: cs-pulse 2.6s ease-in-out infinite; }
+@keyframes cs-hover { 0%, 100% { transform: translate(4px, -22px) rotate(-6deg); } 50% { transform: translate(4px, -30px) rotate(-3deg); } }
+@keyframes cs-shadow { 0%, 100% { transform: scaleX(.8); } 50% { transform: scaleX(.6); } }
+@keyframes cs-breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.035); } }
+@keyframes cs-weave { 0%, 100% { stroke-dashoffset: 80; } 50% { stroke-dashoffset: 34; } }
+@keyframes cs-march { to { stroke-dashoffset: -38; } }
+@keyframes cs-pulse { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(.7); opacity: .6; } }
+.cs .saved .wm-nest { opacity: 1; transition-delay: .1s; }
+.cs .saved .wm-strand { stroke-dasharray: 80; stroke-dashoffset: 0; transition: stroke-dashoffset .5s .15s ease-out; }
+.cs .saved .wm-rim, .cs .saved .wm-shadow { opacity: 0; }
+.cs .saved .wm-bird { animation: cs-land .7s .45s cubic-bezier(.22,.8,.24,1) both; }
+.cs .saved .wm-dot { fill: var(--good); transform-origin: 184px 20px; animation: cs-okpop .55s .2s cubic-bezier(.22,.8,.24,1) both; }
+@keyframes cs-land { 0% { transform: translate(4px, -26px) rotate(-5deg); } 70% { transform: translate(0, 2px) scale(1.04, .94); } 100% { transform: none; } }
+@keyframes cs-okpop { 0% { transform: scale(.7); } 60% { transform: scale(1.25); } 100% { transform: scale(1); } }
+@media (prefers-reduced-motion: reduce) {
+  .cs, .cs * { animation: none !important; transition: none !important; }
+}

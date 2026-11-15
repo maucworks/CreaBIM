@@ -2378,7 +2378,9 @@ pub fn toggle_live(ctx: &egui::Context) -> bool {
     if ctx.egui_wants_keyboard_input() {
         return false;
     }
-    let pressed = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::D));
+    // consume_key ignores Shift, which took Shift+D (Duplicate) for D
+    let pressed =
+        ctx.input_mut(|i| !i.modifiers.shift && i.consume_key(egui::Modifiers::NONE, egui::Key::D));
     if pressed {
         let on = !live_on(ctx);
         ctx.data_mut(|d| d.insert_temp(egui::Id::new("grip.live"), on));

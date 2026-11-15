@@ -73,6 +73,14 @@ pub struct MastersUi {
     pub hide_guides: bool,
     /// A field of your own being named, from the Field menu.
     asking_field: Option<String>,
+    /// What is typed in Properties, kept while a field has the focus and
+    /// saved when it loses it: a picked text's words (master, item) and
+    /// the values of a master's own fields (master, field).
+    text_drafts: std::collections::HashMap<(ElementId, usize), String>,
+    field_drafts: std::collections::HashMap<(ElementId, String), String>,
+    /// A master's name as typed in Properties, kept while its field has
+    /// the focus and saved when it loses it.
+    names: std::collections::HashMap<ElementId, String>,
     /// The border picked (its margins in Properties), and an edge being
     /// dragged: (0 left, 1 bottom, 2 right, 3 top; where it is now, mm).
     pub border_sel: bool,
@@ -168,10 +176,14 @@ fn item_box(it: &TitleItem) -> (DVec2, DVec2) {
             size,
             text,
             align,
-            ..
+            angle,
         } => {
+            // its corners turned with it, about its point
             let (lo, hi) = text_box(*at, *size, text, *align);
-            vec![lo, hi]
+            let turn = DVec2::from_angle(*angle);
+            [lo, DVec2::new(hi.x, lo.y), hi, DVec2::new(lo.x, hi.y)]
+                .map(|c| *at + turn.rotate(c - *at))
+                .to_vec()
         }
         _ => it.points(),
     };
@@ -223,7 +235,19 @@ fn item_dist(it: &TitleItem, p: DVec2) -> f64 {
                 edges(points, *closed)
             }
         }
-        TitleItem::Text { .. } | TitleItem::Image { .. } | TitleItem::Logo { .. } => {
+        TitleItem::Text {
+            at,
+            size,
+            text,
+            align,
+            angle,
+        } => {
+            // measured along the text: the point turned back by its angle
+            let q = *at + DVec2::from_angle(-*angle).rotate(p - *at);
+            let (lo, hi) = text_box(*at, *size, text, *align);
+            q.distance(q.clamp(lo, hi))
+        }
+        TitleItem::Image { .. } | TitleItem::Logo { .. } => {
             let (lo, hi) = item_box(it);
             p.distance(p.clamp(lo, hi))
         }
@@ -383,12 +407,15 @@ impl CreaBimApp {
         self.masters.camera = None;
         self.masters.drawing.clear();
         self.prop_tab = PropTab::Master;
-        if !self
-            .areas
-            .root
-            .areas()
-            .contains(&crate::areas::Shows::Masters)
+        // a Masters view already up comes to the front, so Properties
+        // shows the master (not what was picked before)
+        let shows = self.areas.root.areas();
+        if let Some(i) = shows
+            .iter()
+            .position(|s| *s == crate::areas::Shows::Masters)
         {
+            self.areas.focus = i;
+        } else {
             let i = self.areas.focus;
             if let Some(s) = self.areas.root.get_mut(i) {
                 *s = crate::areas::Shows::Masters;
@@ -1438,9 +1465,16 @@ impl CreaBimApp {
                         };
                         let p = to_s(o + *at);
                         let top_left = p + rot(egui::vec2(-dx, -sz.y / 2.0));
-                        if a == 0.0 {
-                            text_rects.push((idx, Rect::from_min_size(top_left, sz)));
-                        }
+                        // the box round the letters as drawn, turned or not:
+                        // a guess from the letter count fell short of capitals
+                        let corners = [
+                            egui::vec2(0.0, 0.0),
+                            egui::vec2(sz.x, 0.0),
+                            egui::vec2(sz.x, sz.y),
+                            egui::vec2(0.0, sz.y),
+                        ]
+                        .map(|v| top_left + rot(v));
+                        text_rects.push((idx, Rect::from_points(&corners)));
                         // a field is a chip: what each sheet fills in
                         if field && a == 0.0 {
                             painter.rect_filled(
@@ -2149,17 +2183,23 @@ impl CreaBimApp {
         };
         let users = super::drafting::template_users(self.doc.model(), id);
         if self.prop_header(ui, "master_about", "Master", true, None) {
-            let mut n = name.clone();
+            // a draft that outlives the frame: a copy remade each frame
+            // threw away what was typed
+            let draft = self.masters.names.entry(id).or_insert_with(|| name.clone());
             let r = crate::props::row(ui, "Name", |ui| {
                 crate::props::fill(
                     ui,
-                    egui::TextEdit::singleline(&mut n).vertical_align(egui::Align::Center),
+                    egui::TextEdit::singleline(draft)
+                        .vertical_align(egui::Align::Center)
+                        .id(master_name_id(id)),
                 )
             });
-            if r.lost_focus() && !n.trim().is_empty() && n.trim() != name {
-                let new = n.trim().to_string();
+            if r.lost_focus() && !draft.trim().is_empty() && draft.trim() != name {
+                let new = draft.trim().to_string();
                 let res = self.doc.edit(id, "Rename master", |e| e.name = new.clone());
                 self.report(res, format!("Renamed {new}."));
+            } else if !r.has_focus() && *draft != name {
+                *draft = name.clone();
             }
             let size = t.paper.unwrap_or(DVec2::new(420.0, 297.0));
             let now = PAPERS
@@ -2270,14 +2310,25 @@ impl CreaBimApp {
                 crate::props::row(ui, &format!("{{{f}}}"), |ui| {
                     ui.horizontal(|ui| {
                         let w = ui.available_width() - 26.0;
-                        changed |= ui
-                            .add(
-                                egui::TextEdit::singleline(v)
-                                    .vertical_align(egui::Align::Center)
-                                    .desired_width(w)
-                                    .hint_text("Until a sheet fills it"),
-                            )
-                            .lost_focus();
+                        // a draft that outlives the frame, as the name's
+                        let draft = self
+                            .masters
+                            .field_drafts
+                            .entry((id, f.clone()))
+                            .or_insert_with(|| v.clone());
+                        let r = ui.add(
+                            egui::TextEdit::singleline(draft)
+                                .vertical_align(egui::Align::Center)
+                                .desired_width(w)
+                                .hint_text("Until a sheet fills it")
+                                .id(master_field_id(id, f)),
+                        );
+                        if r.lost_focus() && *draft != *v {
+                            *v = draft.clone();
+                            changed = true;
+                        } else if !r.has_focus() && *draft != *v {
+                            *draft = v.clone();
+                        }
                         if crate::props::icon_button(ui, "trash-2", "Remove this field").clicked() {
                             remove = Some(k);
                         }
@@ -2474,14 +2525,26 @@ impl CreaBimApp {
                 align,
                 angle,
             } => {
+                // a draft that outlives the frame: `text` is remade from
+                // the master each frame and lost what was typed
+                let draft = self
+                    .masters
+                    .text_drafts
+                    .entry((id, i))
+                    .or_insert_with(|| text.clone());
                 let r = crate::props::row(ui, "Words", |ui| {
                     crate::props::fill(
                         ui,
-                        egui::TextEdit::singleline(text).vertical_align(egui::Align::Center),
+                        egui::TextEdit::singleline(draft)
+                            .vertical_align(egui::Align::Center)
+                            .id(master_text_id(id, i)),
                     )
                 });
-                if r.lost_focus() {
+                if r.lost_focus() && *draft != *text {
+                    *text = draft.clone();
                     label = Some("Master text");
+                } else if !r.has_focus() && *draft != *text {
+                    *draft = text.clone();
                 }
                 if crate::props::row(ui, "Size", |ui| {
                     crate::props::fill(
@@ -2822,9 +2885,163 @@ fn sheet_picture_kind(p: &std::path::Path, w: f64) -> Result<creabim_core::Paper
     })
 }
 
+/// A picked master text's Words field in Properties.
+fn master_text_id(id: ElementId, item: usize) -> egui::Id {
+    egui::Id::new(("master-text", id, item))
+}
+
+/// The value field of a master's own field in Properties.
+fn master_field_id(id: ElementId, field: &str) -> egui::Id {
+    egui::Id::new(("master-own-field", id, field))
+}
+
+/// The master name field's id in Properties.
+fn master_name_id(id: ElementId) -> egui::Id {
+    egui::Id::new(("master-name", id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Frames of the master's Properties, typing `words` into the field
+    /// `field` and then leaving it.
+    fn type_into(app: &mut CreaBimApp, field: egui::Id, words: &[&str]) {
+        let ctx = egui::Context::default();
+        let frame = |app: &mut CreaBimApp, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                app.master_props(ui);
+            });
+            out.textures_delta.clear();
+        };
+        frame(app, vec![]);
+        ctx.memory_mut(|m| m.request_focus(field));
+        frame(app, vec![]);
+        for w in words {
+            frame(app, vec![egui::Event::Text((*w).into())]);
+        }
+        ctx.memory_mut(|m| m.surrender_focus(field));
+        frame(app, vec![]);
+    }
+
+    #[test]
+    fn a_picked_text_and_a_field_of_its_own_take_what_is_typed() {
+        // both were remade from the saved master every frame: what was
+        // typed flickered and was gone
+        let mut app = crate::app::test_app();
+        app.open_master(None);
+        app.add_master("Studio".into(), tb::minimal_band());
+        let (id, _, t) = app.master().expect("a master");
+        let i = t
+            .items
+            .iter()
+            .position(|it| matches!(it, TitleItem::Text { .. }))
+            .expect("a text in the master");
+        app.masters.sel = Some(i);
+        type_into(&mut app, master_text_id(id, i), &["X", "Y"]);
+        let (_, _, t) = app.master().unwrap();
+        let TitleItem::Text { text, .. } = &t.items[i] else {
+            unreachable!()
+        };
+        assert!(text.contains("XY"), "{text}");
+        // a field of its own
+        app.edit_master("Master field", |t| {
+            t.fields.push(("client".into(), String::new()))
+        });
+        type_into(&mut app, master_field_id(id, "client"), &["A", "B"]);
+        let (_, _, t) = app.master().unwrap();
+        let v = &t.fields.iter().find(|(f, _)| f == "client").unwrap().1;
+        assert_eq!(v, "AB");
+    }
+
+    #[test]
+    fn a_turned_text_is_boxed_and_picked_along_its_letters() {
+        // a vertical text kept the box of a level one: picked and outlined
+        // across, beside its letters
+        let text = TitleItem::Text {
+            at: DVec2::ZERO,
+            size: 3.0,
+            text: "ABCDEFGHIJ".into(),
+            align: TextAlign::Start,
+            angle: std::f64::consts::FRAC_PI_2,
+        };
+        // it runs up from its point
+        assert_eq!(item_dist(&text, DVec2::new(0.0, 10.0)), 0.0);
+        assert!(item_dist(&text, DVec2::new(10.0, 0.0)) > 4.0);
+        let (lo, hi) = item_box(&text);
+        assert!(hi.y - lo.y > 10.0, "tall: {lo} {hi}");
+        assert!(hi.x - lo.x < 5.0, "narrow: {lo} {hi}");
+    }
+
+    #[test]
+    fn a_master_is_renamed_by_typing_in_its_name_field() {
+        // the field was remade from the saved name every frame: what was
+        // typed flickered and was gone, and the name never changed
+        let mut app = crate::app::test_app();
+        app.open_master(None);
+        app.add_master("Studio".into(), tb::minimal_band());
+        let (id, name, _) = app.master().expect("a master to rename");
+        let ctx = egui::Context::default();
+        let frame = |app: &mut CreaBimApp, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                app.master_props(ui);
+            });
+            out.textures_delta.clear();
+        };
+        frame(&mut app, vec![]);
+        ctx.memory_mut(|m| m.request_focus(master_name_id(id)));
+        frame(&mut app, vec![]);
+        // typed over two frames
+        frame(&mut app, vec![egui::Event::Text("X".into())]);
+        frame(&mut app, vec![egui::Event::Text("Y".into())]);
+        // and left: the name is saved
+        ctx.memory_mut(|m| m.surrender_focus(master_name_id(id)));
+        frame(&mut app, vec![]);
+        let now = app.doc.model().get(id).unwrap().name.clone();
+        assert_ne!(now, name, "the master was renamed");
+        assert!(now.contains("XY"), "{now}");
+    }
+
+    #[test]
+    fn a_master_picked_in_the_browser_brings_its_view_to_the_front() {
+        // with the Masters view beside a plan that had the focus, Properties
+        // kept showing what was picked before (a wall type)
+        use crate::areas::{Node, Shows};
+        let mut app = crate::app::test_app();
+        app.areas.root = Node::split(
+            false,
+            0.5,
+            Node::Area(Shows::Model),
+            Node::Area(Shows::Masters),
+        );
+        app.areas.focus = 0;
+        app.open_master(None);
+        assert_eq!(app.areas.focus, 1, "the Masters view is in front");
+        assert!(app.prop_tabs().contains(&PropTab::Master));
+        // and the master shows, though a wall is still picked
+        let wall = app
+            .doc
+            .model()
+            .iter()
+            .find(|e| matches!(e.kind, creabim_core::ElementKind::Wall(_)))
+            .map(|e| e.id);
+        app.selection.set(wall);
+        assert!(app.selection.active.is_some());
+        assert!(PropTab::Master.of_its_view());
+        assert_eq!(
+            app.areas.root.areas(),
+            [Shows::Model, Shows::Masters],
+            "the plan stays as it was"
+        );
+    }
 
     #[test]
     fn text_shapes_and_pictures_are_picked_near_or_in_them() {

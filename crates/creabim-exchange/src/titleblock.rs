@@ -8,8 +8,9 @@
 //! border. A smaller one is taken as a title block and moved into the
 //! sheet's lower-right corner, inside the margin.
 //!
-//! Blocks (DXF INSERTs), hatches, images and SVG curves beyond straight
-//! segments are not read; curves come in as their end points joined.
+//! DXF blocks (INSERTs) and dimensions are exploded into what they draw.
+//! Hatches, images and SVG curves beyond straight segments are not read;
+//! curves come in as their end points joined.
 
 use creabim_core::titleblock::{Corner, SheetTemplate, TextAlign, TitleItem};
 use glam::DVec2;
@@ -21,11 +22,12 @@ const SHEET_SIZED: f64 = 250.0;
 
 /// Read a title block from a `.dxf` or `.svg` file.
 pub fn read(path: &str) -> Result<SheetTemplate, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("couldn't read {path}: {e}"))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("couldn't read {path}: {e}"))?;
     let lower = path.to_lowercase();
     let items = if lower.ends_with(".dxf") {
-        dxf_items(&text)?
+        dxf_items(&dxf_text(&bytes))?
     } else if lower.ends_with(".svg") {
+        let text = String::from_utf8(bytes).map_err(|e| format!("couldn't read {path}: {e}"))?;
         svg_items(&text)?
     } else {
         return Err("title blocks are read from .dxf or .svg files".into());
@@ -98,14 +100,138 @@ fn dxf_unit(code: i64) -> f64 {
     }
 }
 
+/// A DXF file's text from its bytes: UTF-8 (AutoCAD 2007 and later), else
+/// Windows code page 1252, which DXF 2004 and older are written in across
+/// Western Europe. Other code pages open too, with some letters wrong.
+pub fn dxf_text(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_string(),
+        Err(_) => bytes.iter().map(|b| cp1252(*b)).collect(),
+    }
+}
+
+/// One byte of Windows code page 1252.
+fn cp1252(b: u8) -> char {
+    const HIGH: [u32; 32] = [
+        0x20AC, 0x81, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160,
+        0x2039, 0x0152, 0x8D, 0x017D, 0x8F, 0x90, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013,
+        0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x9D, 0x017E, 0x0178,
+    ];
+    match b {
+        0x80..=0x9F => char::from_u32(HIGH[(b - 0x80) as usize]).unwrap_or('?'),
+        _ => b as char,
+    }
+}
+
+/// DXF text escapes: `\U+XXXX` letters, and the `%%c` `%%d` `%%p` symbols
+/// (diameter, degree, plus-minus); `%%u` and `%%o` (underline, overline)
+/// are dropped.
+fn dxf_escapes(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(c) = rest.chars().next() {
+        if let Some(hex) = rest.strip_prefix("\\U+").or(rest.strip_prefix("\\u+")) {
+            let ch = hex
+                .get(..4)
+                .and_then(|h| u32::from_str_radix(h, 16).ok())
+                .and_then(char::from_u32);
+            if let Some(ch) = ch {
+                out.push(ch);
+                rest = &hex[4..];
+                continue;
+            }
+        }
+        if let Some(code) = rest.strip_prefix("%%").and_then(|r| r.bytes().next()) {
+            let sym = match code.to_ascii_lowercase() {
+                b'c' => Some(Some('Ø')),
+                b'd' => Some(Some('°')),
+                b'p' => Some(Some('±')),
+                b'%' => Some(Some('%')),
+                b'u' | b'o' => Some(None),
+                _ => None,
+            };
+            if let Some(sym) = sym {
+                out.extend(sym);
+                rest = &rest[3..];
+                continue;
+            }
+        }
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
+/// A DXF group: its code and value.
+type Group<'a> = (i64, &'a str);
+/// One DXF entity: its type and its groups up to the next 0 group.
+type Ent<'a> = (&'a str, &'a [Group<'a>]);
+
+/// Blocks inside blocks are read this deep; deeper (or a block that holds
+/// itself) is left out.
+const MAX_NESTING: usize = 16;
+/// The most copies one INSERT's rows and columns make.
+const MAX_ARRAY: i64 = 10_000;
+/// The most items one file makes in all: arrays inside arrays multiply
+/// past the caps above, and would hang the app opening the file. A file
+/// that reaches it is drawn that far (see [`dxf_capped`]).
+pub const MAX_ITEMS: usize = 1_000_000;
+
+/// Did reading stop at [`MAX_ITEMS`], leaving part of the drawing out?
+pub fn dxf_capped(items: &[TitleItem]) -> bool {
+    items.len() >= MAX_ITEMS
+}
+
+/// The entities of the section `name`, if the file has one.
+fn dxf_section<'a>(pairs: &'a [Group<'a>], name: &str) -> Option<Vec<Ent<'a>>> {
+    let start = pairs
+        .windows(2)
+        .position(|w| w[0] == (0, "SECTION") && w[1] == (2, name))?
+        + 2;
+    let mut out = vec![];
+    let mut i = start;
+    while i < pairs.len() {
+        if pairs[i].0 != 0 {
+            i += 1;
+            continue;
+        }
+        let kind = pairs[i].1;
+        if kind == "ENDSEC" {
+            break;
+        }
+        let mut j = i + 1;
+        while j < pairs.len() && pairs[j].0 != 0 {
+            j += 1;
+        }
+        out.push((kind, &pairs[i + 1..j]));
+        i = j;
+    }
+    Some(out)
+}
+
+fn translate(v: DVec2) -> Affine {
+    [1.0, 0.0, 0.0, 1.0, v.x, v.y]
+}
+
+fn rotate(degrees: f64) -> Affine {
+    let (s, c) = degrees.to_radians().sin_cos();
+    [c, s, -s, c, 0.0, 0.0]
+}
+
+/// How much `m` scales lengths (the mean of its two axes).
+fn scale_of(m: &Affine) -> f64 {
+    (m[0] * m[3] - m[1] * m[2]).abs().sqrt()
+}
+
 /// The lines, polylines, circles, arcs and text of a DXF file's
-/// entities, in mm.
+/// entities, in mm. Blocks (INSERTs) are exploded into what they hold,
+/// and dimensions into the lines and text AutoCAD draws them with.
 pub fn dxf_items(text: &str) -> Result<Vec<TitleItem>, String> {
     let lines: Vec<&str> = text.lines().map(str::trim).collect();
     if lines.len() < 2 {
         return Err("that is not a DXF file".into());
     }
-    let pairs: Vec<(i64, &str)> = lines
+    let pairs: Vec<Group> = lines
         .chunks(2)
         .filter(|c| c.len() == 2)
         .filter_map(|c| Some((c[0].parse::<i64>().ok()?, c[1])))
@@ -120,60 +246,97 @@ pub fn dxf_items(text: &str) -> Result<Vec<TitleItem>, String> {
             k = dxf_unit(w[1].1.parse().unwrap_or(4));
         }
     }
-    // the entities: each starts at a 0 group
-    let start = pairs
-        .iter()
-        .position(|p| *p == (2, "ENTITIES"))
-        .ok_or("the DXF file has no ENTITIES section")?;
+    let entities = dxf_section(&pairs, "ENTITIES").ok_or("the DXF file has no ENTITIES section")?;
+    // each block's base point and entities, by name
+    let mut blocks = std::collections::HashMap::new();
+    let mut open: Option<(&str, DVec2, Vec<Ent>)> = None;
+    for e in dxf_section(&pairs, "BLOCKS").unwrap_or_default() {
+        match e.0 {
+            "BLOCK" => {
+                let name = e.1.iter().find(|q| q.0 == 2).map_or("", |q| q.1);
+                let num = |c: i64| {
+                    e.1.iter()
+                        .find(|q| q.0 == c)
+                        .and_then(|q| q.1.parse::<f64>().ok())
+                        .unwrap_or(0.0)
+                };
+                open = Some((name, DVec2::new(num(10), num(20)), vec![]));
+            }
+            "ENDBLK" => {
+                if let Some((name, base, ents)) = open.take() {
+                    blocks.insert(name, (base, ents));
+                }
+            }
+            _ => {
+                if let Some((_, _, ents)) = &mut open {
+                    ents.push(e);
+                }
+            }
+        }
+    }
     let mut out = vec![];
-    let mut i = start + 1;
+    dxf_draw(&entities, &[k, 0.0, 0.0, k, 0.0, 0.0], 0, &blocks, &mut out);
+    out.truncate(MAX_ITEMS);
+    Ok(out)
+}
+
+/// Draw `ents` through `m` (drawing units to mm) into `out`.
+fn dxf_draw(
+    ents: &[Ent],
+    m: &Affine,
+    depth: usize,
+    blocks: &std::collections::HashMap<&str, (DVec2, Vec<Ent>)>,
+    out: &mut Vec<TitleItem>,
+) {
     let num = |v: &str| v.trim().parse::<f64>().unwrap_or(0.0);
-    let mut poly: Option<(Vec<DVec2>, bool)> = None;
-    while i < pairs.len() {
-        let (code, name) = pairs[i];
-        if code != 0 {
-            i += 1;
-            continue;
+    let mut poly: Option<(Vec<DVec2>, bool, Affine)> = None;
+    for &(name, g) in ents {
+        if out.len() >= MAX_ITEMS {
+            out.truncate(MAX_ITEMS);
+            return;
         }
-        if name == "ENDSEC" {
-            break;
-        }
-        let mut j = i + 1;
-        while j < pairs.len() && pairs[j].0 != 0 {
-            j += 1;
-        }
-        let g = &pairs[i + 1..j];
         let get = |c: i64| g.iter().find(|p| p.0 == c).map(|p| num(p.1));
-        let p = |x: i64, y: i64| DVec2::new(get(x).unwrap_or(0.0), get(y).unwrap_or(0.0)) * k;
+        let raw = |x: i64, y: i64| DVec2::new(get(x).unwrap_or(0.0), get(y).unwrap_or(0.0));
+        // most entities lie in their own plane; one seen from below
+        // (extrusion -Z) is mirrored in x
+        let mo = if get(230).is_some_and(|z| z < 0.0) {
+            compose(m, &[-1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+        } else {
+            *m
+        };
+        let s = scale_of(&mo);
         match name {
             "LINE" => out.push(TitleItem::Line {
-                points: vec![p(10, 20), p(11, 21)],
+                points: vec![apply(m, raw(10, 20)), apply(m, raw(11, 21))],
                 width: 0.25,
             }),
             "LWPOLYLINE" => {
                 let xs = g.iter().filter(|q| q.0 == 10).map(|q| num(q.1));
                 let ys = g.iter().filter(|q| q.0 == 20).map(|q| num(q.1));
-                let mut pts: Vec<DVec2> = xs.zip(ys).map(|(x, y)| DVec2::new(x, y) * k).collect();
+                let mut pts: Vec<DVec2> = xs
+                    .zip(ys)
+                    .map(|(x, y)| apply(&mo, DVec2::new(x, y)))
+                    .collect();
                 let closed = get(70).is_some_and(|f| (f as i64) & 1 == 1);
                 if closed && !pts.is_empty() {
                     pts.push(pts[0]);
                 }
-                let width = get(43).map_or(0.25, |w| (w * k).max(0.13));
+                let width = get(43).map_or(0.25, |w| (w * s).max(0.13));
                 if pts.len() > 1 {
                     out.push(TitleItem::Line { points: pts, width });
                 }
             }
             "POLYLINE" => {
                 let closed = get(70).is_some_and(|f| (f as i64) & 1 == 1);
-                poly = Some((vec![], closed));
+                poly = Some((vec![], closed, mo));
             }
             "VERTEX" => {
-                if let Some((pts, _)) = &mut poly {
-                    pts.push(p(10, 20));
+                if let Some((pts, _, pm)) = &mut poly {
+                    pts.push(apply(pm, raw(10, 20)));
                 }
             }
             "SEQEND" => {
-                if let Some((mut pts, closed)) = poly.take() {
+                if let Some((mut pts, closed, _)) = poly.take() {
                     if closed && !pts.is_empty() {
                         pts.push(pts[0]);
                     }
@@ -186,8 +349,8 @@ pub fn dxf_items(text: &str) -> Result<Vec<TitleItem>, String> {
                 }
             }
             "CIRCLE" | "ARC" => {
-                let c = p(10, 20);
-                let r = get(40).unwrap_or(0.0) * k;
+                let c = raw(10, 20);
+                let r = get(40).unwrap_or(0.0);
                 let (a0, a1) = if name == "ARC" {
                     let (a, b) = (get(50).unwrap_or(0.0), get(51).unwrap_or(360.0));
                     (a, if b < a { b + 360.0 } else { b })
@@ -197,9 +360,9 @@ pub fn dxf_items(text: &str) -> Result<Vec<TitleItem>, String> {
                 if r > 0.0 {
                     let n = (((a1 - a0) / 10.0).ceil() as usize).max(4);
                     let points = (0..=n)
-                        .map(|s| {
-                            let t = (a0 + (a1 - a0) * s as f64 / n as f64).to_radians();
-                            c + DVec2::from_angle(t) * r
+                        .map(|st| {
+                            let t = (a0 + (a1 - a0) * st as f64 / n as f64).to_radians();
+                            apply(&mo, c + DVec2::from_angle(t) * r)
                         })
                         .collect();
                     out.push(TitleItem::Line {
@@ -208,62 +371,114 @@ pub fn dxf_items(text: &str) -> Result<Vec<TitleItem>, String> {
                     });
                 }
             }
-            "TEXT" | "MTEXT" => {
-                let raw: String = if name == "MTEXT" {
+            "TEXT" | "MTEXT" | "ATTRIB" => {
+                // an attribute can be hidden
+                if name == "ATTRIB" && get(70).is_some_and(|f| (f as i64) & 1 == 1) {
+                    continue;
+                }
+                let tm = if name == "MTEXT" { *m } else { mo };
+                let raw_text: String = if name == "MTEXT" {
                     // long text comes in 3 groups before the last 1
-                    let mut s: String = g
+                    let mut t: String = g
                         .iter()
                         .filter(|q| q.0 == 3)
                         .map(|q| q.1)
                         .collect::<Vec<_>>()
                         .concat();
-                    s.push_str(g.iter().find(|q| q.0 == 1).map_or("", |q| q.1));
-                    mtext_plain(&s)
+                    t.push_str(g.iter().find(|q| q.0 == 1).map_or("", |q| q.1));
+                    mtext_plain(&dxf_escapes(&t))
                 } else {
-                    g.iter().find(|q| q.0 == 1).map_or("", |q| q.1).to_string()
+                    dxf_escapes(g.iter().find(|q| q.0 == 1).map_or("", |q| q.1))
                 };
-                let size = get(40).unwrap_or(2.5) * k;
+                let size = get(40).unwrap_or(2.5);
                 // left, centre, right; TEXT aligns on its second point then
                 let h = get(72).unwrap_or(0.0) as i64;
                 let align = match (name, h, get(71).map(|v| v as i64)) {
                     ("MTEXT", _, Some(2 | 5 | 8)) => TextAlign::Middle,
                     ("MTEXT", _, Some(3 | 6 | 9)) => TextAlign::End,
-                    ("TEXT", 1 | 4, _) => TextAlign::Middle,
-                    ("TEXT", 2, _) => TextAlign::End,
+                    ("TEXT" | "ATTRIB", 1 | 4, _) => TextAlign::Middle,
+                    ("TEXT" | "ATTRIB", 2, _) => TextAlign::End,
                     _ => TextAlign::Start,
                 };
-                let base = if name == "TEXT" && h != 0 && get(11).is_some() {
-                    p(11, 21)
+                let base = if name != "MTEXT" && h != 0 && get(11).is_some() {
+                    raw(11, 21)
                 } else {
-                    p(10, 20)
+                    raw(10, 20)
                 };
-                let angle = get(50).unwrap_or(0.0).to_radians();
+                let local = get(50).unwrap_or(0.0).to_radians();
                 // DXF places text by its baseline (MTEXT by its top);
                 // a title item by its middle
-                let up = DVec2::from_angle(angle).perp();
+                let up = DVec2::from_angle(local).perp();
                 let at = if name == "MTEXT" {
                     base - up * size * 0.5
                 } else {
                     base + up * size * 0.5
                 };
-                for (n, line) in raw.split('\n').enumerate() {
+                // the angle as the block turns it
+                let along = apply(&tm, DVec2::from_angle(local)) - apply(&tm, DVec2::ZERO);
+                let angle = along.y.atan2(along.x);
+                for (n, line) in raw_text.split('\n').enumerate() {
                     if line.trim().is_empty() {
                         continue;
                     }
                     out.push(TitleItem::Text {
-                        at: at - up * size * 1.5 * n as f64,
-                        size: size.max(0.5),
+                        at: apply(&tm, at - up * size * 1.5 * n as f64),
+                        size: (size * scale_of(&tm)).max(0.5),
                         text: line.to_string(),
                         align,
                         angle,
                     });
                 }
             }
+            "INSERT" => {
+                let block = g.iter().find(|q| q.0 == 2).map_or("", |q| q.1);
+                let Some((base, inner)) = blocks.get(block) else {
+                    continue;
+                };
+                if depth >= MAX_NESTING {
+                    continue;
+                }
+                let place = compose(&translate(raw(10, 20)), &rotate(get(50).unwrap_or(0.0)));
+                let size = compose(
+                    &[
+                        get(41).unwrap_or(1.0),
+                        0.0,
+                        0.0,
+                        get(42).unwrap_or(1.0),
+                        0.0,
+                        0.0,
+                    ],
+                    &translate(-*base),
+                );
+                let cols = (get(70).unwrap_or(1.0) as i64).max(1);
+                let rows = (get(71).unwrap_or(1.0) as i64).max(1);
+                if cols.saturating_mul(rows) > MAX_ARRAY {
+                    continue;
+                }
+                let (dx, dy) = (get(44).unwrap_or(0.0), get(45).unwrap_or(0.0));
+                for r in 0..rows {
+                    for c in 0..cols {
+                        if out.len() >= MAX_ITEMS {
+                            break;
+                        }
+                        let step = translate(DVec2::new(c as f64 * dx, r as f64 * dy));
+                        let one = compose(&compose(&place, &step), &size);
+                        dxf_draw(inner, &compose(&mo, &one), depth + 1, blocks, out);
+                    }
+                }
+            }
+            // a dimension is drawn by its own block, in place
+            "DIMENSION" => {
+                let block = g.iter().find(|q| q.0 == 2).map_or("", |q| q.1);
+                if let Some((_, inner)) = blocks.get(block) {
+                    if depth < MAX_NESTING {
+                        dxf_draw(inner, m, depth + 1, blocks, out);
+                    }
+                }
+            }
             _ => {}
         }
-        i = j;
     }
-    Ok(out)
 }
 
 /// MTEXT without its formatting codes; `\P` breaks lines.
@@ -1322,6 +1537,127 @@ mod tests {
             "{lo} {hi}"
         );
         assert_eq!(t.fields, vec![("drawn_by".to_string(), String::new())]);
+    }
+
+    /// A DXF with `blocks` and `entities`, in mm.
+    fn dxf_with(blocks: &str, entities: &str) -> String {
+        format!(
+            "0\nSECTION\n2\nHEADER\n9\n$INSUNITS\n70\n4\n0\nENDSEC\n\
+             0\nSECTION\n2\nBLOCKS\n{blocks}0\nENDSEC\n\
+             0\nSECTION\n2\nENTITIES\n{entities}0\nENDSEC\n0\nEOF\n"
+        )
+    }
+
+    fn lines_of(items: &[TitleItem]) -> Vec<Vec<DVec2>> {
+        items
+            .iter()
+            .filter_map(|i| match i {
+                TitleItem::Line { points, .. } => Some(points.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn near(a: DVec2, b: DVec2) -> bool {
+        (a - b).length() < 1e-9
+    }
+
+    /// Block "B": a line from its base point (10, 0) to (20, 0).
+    const BLOCK_B: &str =
+        "0\nBLOCK\n2\nB\n10\n10\n20\n0\n0\nLINE\n10\n10\n20\n0\n11\n20\n21\n0\n0\nENDBLK\n";
+
+    #[test]
+    fn a_dxf_block_is_exploded_where_it_is_inserted() {
+        // placed at (100, 50), twice as big, turned a quarter
+        let text = dxf_with(
+            BLOCK_B,
+            "0\nINSERT\n2\nB\n10\n100\n20\n50\n41\n2\n42\n2\n50\n90\n",
+        );
+        let lines = lines_of(&dxf_items(&text).unwrap());
+        assert_eq!(lines.len(), 1);
+        assert!(near(lines[0][0], DVec2::new(100.0, 50.0)), "{:?}", lines[0]);
+        assert!(near(lines[0][1], DVec2::new(100.0, 70.0)), "{:?}", lines[0]);
+    }
+
+    #[test]
+    fn a_mirrored_and_arrayed_dxf_block_makes_each_copy() {
+        // mirrored in x, in 2 columns 50 apart and 3 rows 30 apart
+        let text = dxf_with(
+            BLOCK_B,
+            "0\nINSERT\n2\nB\n10\n0\n20\n0\n41\n-1\n70\n2\n71\n3\n44\n50\n45\n30\n",
+        );
+        let lines = lines_of(&dxf_items(&text).unwrap());
+        assert_eq!(lines.len(), 6);
+        assert!(near(lines[0][1], DVec2::new(-10.0, 0.0)), "{:?}", lines[0]);
+        assert!(lines.iter().any(|l| near(l[0], DVec2::new(50.0, 60.0))));
+    }
+
+    #[test]
+    fn arrays_inside_arrays_stop_at_the_file_s_item_budget() {
+        // 100 x 100 copies of a block that is itself 100 x 100 copies of a
+        // line: a hundred million lines, each array under its own cap
+        let blocks = format!(
+            "{BLOCK_B}0\nBLOCK\n2\nGRID\n10\n0\n20\n0\n\
+             0\nINSERT\n2\nB\n10\n0\n20\n0\n70\n100\n71\n100\n44\n1\n45\n1\n0\nENDBLK\n"
+        );
+        let text = dxf_with(
+            &blocks,
+            "0\nINSERT\n2\nGRID\n10\n0\n20\n0\n70\n100\n71\n100\n44\n200\n45\n200\n",
+        );
+        let items = dxf_items(&text).unwrap();
+        assert_eq!(items.len(), MAX_ITEMS);
+        assert!(dxf_capped(&items));
+        // a small file is not capped
+        let small = dxf_items(&dxf_with(BLOCK_B, "0\nINSERT\n2\nB\n10\n0\n20\n0\n")).unwrap();
+        assert!(!dxf_capped(&small));
+    }
+
+    #[test]
+    fn nested_dxf_blocks_are_read_and_a_block_inside_itself_ends() {
+        let blocks = format!(
+            "{BLOCK_B}0\nBLOCK\n2\nOUTER\n10\n0\n20\n0\n0\nINSERT\n2\nB\n10\n0\n20\n100\n\
+             0\nINSERT\n2\nOUTER\n10\n0\n20\n0\n0\nENDBLK\n"
+        );
+        let text = dxf_with(&blocks, "0\nINSERT\n2\nOUTER\n10\n0\n20\n0\n");
+        let lines = lines_of(&dxf_items(&text).unwrap());
+        // one B in each OUTER, until the nesting runs out
+        assert_eq!(lines.len(), MAX_NESTING - 1);
+        assert!(near(lines[0][0], DVec2::new(0.0, 100.0)));
+    }
+
+    #[test]
+    fn a_dxf_dimension_is_drawn_by_its_block() {
+        let blocks = "0\nBLOCK\n2\n*D1\n10\n0\n20\n0\n0\nLINE\n10\n0\n20\n0\n11\n500\n21\n0\n\
+                      0\nMTEXT\n10\n250\n20\n10\n40\n2.5\n1\n500\n0\nENDBLK\n";
+        let text = dxf_with(blocks, "0\nDIMENSION\n2\n*D1\n");
+        let items = dxf_items(&text).unwrap();
+        assert_eq!(lines_of(&items).len(), 1);
+        assert!(items
+            .iter()
+            .any(|i| matches!(i, TitleItem::Text { text, .. } if text == "500")));
+    }
+
+    #[test]
+    fn an_old_dxf_in_code_page_1252_is_read_with_its_letters() {
+        // DXF 2004 and older aren't UTF-8: "Più" and "©" as Windows writes them
+        let mut bytes = dxf_with("", "0\nTEXT\n10\n0\n20\n0\n40\n3\n1\nPI\n").into_bytes();
+        let at = bytes.windows(3).position(|w| w == b"PI\n").unwrap() + 2;
+        bytes.splice(at..at, *b"\xF9 \xA9");
+        assert!(std::str::from_utf8(&bytes).is_err());
+        let items = dxf_items(&dxf_text(&bytes)).unwrap();
+        let TitleItem::Text { text, .. } = &items[0] else {
+            panic!("{items:?}")
+        };
+        assert_eq!(text, "PIù ©");
+    }
+
+    #[test]
+    fn dxf_text_escapes_become_their_letters_and_symbols() {
+        assert_eq!(
+            dxf_escapes("Citt\\U+00E0 %%c12 45%%d %%p1 %%uA"),
+            "Città Ø12 45° ±1 A"
+        );
+        assert_eq!(dxf_escapes("\\U+zz 100%"), "\\U+zz 100%");
     }
 
     #[test]

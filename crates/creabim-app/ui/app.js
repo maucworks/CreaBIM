@@ -416,12 +416,19 @@
     if (input && document.activeElement !== input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
     const hot = root.querySelector(".mi.hot");
     if (hot) hot.scrollIntoView({ block: "nearest" });
-    post({ t: "size", w: window.innerWidth, h: Math.ceil(root.querySelector(".palette").scrollHeight) + 2 });
+    // the height it wants, measured without the window's cap, so a window
+    // made taller gives the list its room back
+    const pal = root.querySelector(".palette");
+    pal.style.maxHeight = "none";
+    const want = Math.ceil(pal.scrollHeight) + 2;
+    pal.style.maxHeight = "";
+    post({ t: "size", w: window.innerWidth, h: want });
   }
 
   // ---- popup menus ----
 
   function drawPopup() {
+    if (S.close) return drawClose(S.close);
     if (S.dialog) return drawDialog(S.dialog);
     if (S.key === "palette" && S.items && S.items.length) return drawPalette();
     if (S.controls && S.controls.length) return drawPanel(controlsHtml());
@@ -491,13 +498,128 @@
     const card = (c, big) => `<button class="${big ? "np-big" : "np-sample"} ${local.pick === c.id ? "on" : ""}" data-pick="${esc(c.id)}" title="${esc(c.line)}">` +
       (big ? `<span class="np-pic">${icon(c.icon)}</span><span class="np-text"><b>${esc(c.title)}</b><span>${esc(c.line)}</span></span>` :
         `<span class="np-icon">${icon(c.icon)}</span><span class="np-text"><b>${esc(c.title)}</b><span>${esc(c.line)}</span></span>`) + `</button>`;
+    // the choices scroll between the title and the buttons when the window
+    // is too short for them (a small window, or Windows' larger text):
+    // Create and Cancel were out of reach below the edge (issue 24)
+    const was = root.querySelector(".np-body");
+    const top = was && !fresh ? was.scrollTop : 0;
     root.innerHTML = `<div class="np"><div class="np-head"><span class="logo np-logo">${woven("new", fresh)}</span><b>${esc(d.title)}</b><span class="np-esc">Esc to close</span></div>` +
-      `<div class="np-starts">${d.starts.map((c) => card(c, true)).join("")}</div>` +
-      `<div class="np-sub">${esc(d.samples_title)}</div><div class="np-samples">${d.samples.map((c) => card(c, false)).join("")}</div>` +
+      `<div class="np-body"><div class="np-starts">${d.starts.map((c) => card(c, true)).join("")}</div>` +
+      `<div class="np-sub">${esc(d.samples_title)}</div><div class="np-samples">${d.samples.map((c) => card(c, false)).join("")}</div></div>` +
       `<div class="np-foot"><span>${esc(d.note)}</span><span class="spacer"></span><button class="np-btn" data-np="cancel">Cancel</button><button class="np-btn primary" data-np="create">Create</button></div></div>`;
+    const body = root.querySelector(".np-body");
+    if (body) {
+      body.scrollTop = top;
+      const on = body.querySelector(".on");
+      if (on && on.scrollIntoView) on.scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  // ---- Save the changes (REV02 compact): the unsaved nest asks ----
+
+  // The woven mark waiting to be saved (animation bank 1 + 2 + 5): the
+  // bird hovers over its shadow, the nest is pale and breathes, its
+  // outline marches, two strands weave, an orange dot pulses. Saved, the
+  // weave closes, the nest fills, the dot turns green and the bird lands.
+  function unsavedNest() {
+    const nest = "M130 52 C162 64 172 100 166 128 C160 156 146 166 142 190 L118 190 C114 166 98 156 94 128 C88 100 98 64 130 52 Z";
+    return `<svg class="nest" width="46" height="49" viewBox="0 -14 212 224" aria-hidden="true"><g transform="translate(9 4)">` +
+      `<path class="wm-branch" d="M26 52 H174"/><ellipse class="wm-shadow" cx="40" cy="46" rx="22" ry="3.5"/>` +
+      `<path class="wm-nest" d="${nest}"/><path class="wm-strand" d="M98 98 L164 124"/><path class="wm-strand s2" d="M96 132 L160 156"/>` +
+      `<path class="wm-rim" d="${nest}"/><circle class="wm-dot" cx="184" cy="20" r="12"/>` +
+      `<g class="wm-bird"><path d="M44.5 8.0 C51.2 2.1 63.8 3.0 67.2 12.2 C69.7 18.9 66.4 24.8 63.0 29.0 C61.3 39.9 52.9 50.0 38.6 50.8 C32.8 51.3 27.7 50.0 23.5 48.3 L8.4 56.7 L16.8 43.3 C14.3 35.7 16.0 27.3 21.8 22.3 C27.7 17.2 37.8 14.7 44.5 8.0 Z"/><path d="M65.5 10.5 L80.6 16.4 L65.5 21.4 Z"/><circle class="wm-eye" cx="61.5" cy="11.4" r="2.8"/></g></g></svg>`;
+  }
+
+  // Drawn once for a question; Saving… and Saved change it in place, so
+  // the nest's motion carries on into its settling.
+  function drawClose(c) {
+    const failed = c.phase === "failed" || (c.phase === "saving" && c.error);
+    const key = [c.file, c.fresh, c.line, failed ? c.error : ""].join("|");
+    const asking = c.phase === "ask" || c.phase === "failed";
+    let dlg = root.querySelector(".cs");
+    // (a Save as… gives the file its name while it saves: the window
+    // drawn for the question stays, so the nest settles where it is)
+    if (!dlg || (asking && (dlg.dataset.k !== key || dlg.classList.contains("saved")))) {
+      const fn = `<span class="fn">${esc(c.file)}</span>`;
+      const title = failed ? `Couldn't save ${fn}` : c.fresh ? "Save your new project before closing?" : `Save ${fn} before closing?`;
+      const line = failed ? "Your changes are still open. Nothing was lost." : esc(c.line);
+      root.innerHTML = `<div class="cs unsaved" role="dialog" aria-modal="true" aria-labelledby="cs-t">` +
+        `<div class="cs-body"><div class="cs-tile unsaved">${unsavedNest()}</div>` +
+        `<div><h2 id="cs-t">${title}</h2><div class="cs-sub">${line}</div></div>` +
+        (failed ? `<div class="cs-err">${esc(c.error)}</div>` : "") + `</div>` +
+        `<div class="cs-foot"><span class="cs-hints"><kbd>Enter</kbd> save <kbd>Esc</kbd> back</span><span class="cs-sp"></span>` +
+        // (icons stand in for the words when the window is narrow)
+        `<button class="cs-btn danger" data-cs="discard" title="Don't save: close and let the changes go">${icon("trash-2", "ic")}<span class="tx">Don't save</span></button>` +
+        `<button class="cs-btn" data-cs="cancel" title="Cancel: back to the project (Esc)">${icon("undo-2", "ic")}<span class="tx">Cancel</span></button>` +
+        `<button class="cs-btn primary focus" data-cs="save" title="Save, then close (Enter)"><span class="spin"></span>${icon("save", "ic")}<span class="lbl tx"></span></button></div></div>`;
+      dlg = root.querySelector(".cs");
+      dlg.dataset.k = key;
+      local.closeH = null;
+    }
+    const main = c.fresh || failed ? "Save as…" : "Save";
+    const lbl = dlg.querySelector(".lbl");
+    dlg.classList.toggle("saving", c.phase === "saving");
+    if (c.phase === "saved") {
+      if (!dlg.classList.contains("saved")) {
+        dlg.querySelectorAll(".unsaved").forEach((e) => { e.classList.remove("unsaved"); e.classList.add("saved"); });
+        dlg.classList.remove("unsaved");
+        dlg.classList.add("saved", "closing");
+        dlg.querySelector("h2").textContent = "Saved.";
+        dlg.querySelector(".cs-sub").innerHTML = `Everything is in <b>${esc(c.file)}</b>. Closing CreaBIM…`;
+        const err = dlg.querySelector(".cs-err");
+        if (err) err.remove();
+      }
+      lbl.textContent = "Saved";
+    } else {
+      lbl.textContent = c.phase === "saving" ? "Saving…" : main;
+    }
+    closeSize();
+  }
+
+  // Save the changes is as tall as it needs, measured uncut; the window
+  // may give less, and then it scrolls. Measured again when the pane is
+  // placed or resized (it is drawn first while parked, at another width).
+  function closeSize() {
+    const dlg = root.querySelector(".cs");
+    if (!dlg) return;
+    const body = dlg.querySelector(".cs-body");
+    const keep = [dlg.style.height, body.style.flex, body.style.overflowY];
+    dlg.style.height = "auto"; body.style.flex = "none"; body.style.overflowY = "visible";
+    const h = Math.ceil(dlg.getBoundingClientRect().height);
+    [dlg.style.height, body.style.flex, body.style.overflowY] = keep;
+    // (again when the window was opened anew at another height)
+    if (h !== local.closeH || Math.abs(window.innerHeight - h) > 1) {
+      local.closeH = h;
+      post({ t: "size", w: window.innerWidth, h });
+    }
+  }
+  window.addEventListener("resize", closeSize);
+
+  // Enter saves, Esc goes back; nothing while it saves.
+  function closeKey(e) {
+    const c = S && S.close;
+    if (!c) return false;
+    const busy = c.phase === "saving" || c.phase === "saved";
+    if (e.key === "Enter" && !busy) closeAct("save");
+    else if (e.key === "Escape" && !busy) closeAct("cancel");
+    else if (e.key !== "Tab") return false;
+    if (e.key !== "Tab") e.preventDefault();
+    return true;
+  }
+
+  function closeAct(what) {
+    const dlg = root.querySelector(".cs");
+    if (!dlg || dlg.classList.contains("saving") || dlg.classList.contains("saved")) return;
+    // the button spins at once; the app saves on its next frame
+    if (what === "save") {
+      dlg.classList.add("saving");
+      dlg.querySelector(".lbl").textContent = "Saving…";
+    }
+    post({ t: "closeask", do: what });
   }
 
   function dialogKey(e) {
+    if (closeKey(e)) return true;
     const d = S && S.dialog;
     if (!d) return false;
     const all = d.starts.concat(d.samples).map((c) => c.id);
@@ -512,6 +634,8 @@
   }
 
   document.addEventListener("click", (e) => {
+    const cs = S && S.close && e.target.closest && e.target.closest("[data-cs]");
+    if (cs) { closeAct(cs.dataset.cs); return; }
     if (!(S && S.dialog)) return;
     const pick = e.target.closest && e.target.closest("[data-pick]");
     if (pick) { local.pick = pick.dataset.pick; drawDialog(S.dialog); return; }
@@ -1123,6 +1247,9 @@
       }, 450);
     });
     document.addEventListener("mouseleave", hide);
+    // the app's word that the pointer is on the drawing area: this page
+    // never hears it leave
+    window.CB.away = () => { clearTimeout(timer); timer = null; shown = null; };
     document.addEventListener("mousedown", hide, true);
     document.addEventListener("wheel", hide, { passive: true });
   })();

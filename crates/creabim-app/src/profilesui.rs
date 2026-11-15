@@ -300,9 +300,15 @@ impl CreaBimApp {
         self.profiles.name = name.to_string();
         self.profiles.camera = None;
         self.profiles.shape = 0;
-        // in a Profile area: one there, else the focused area turns into one
+        // in a Profile area: one there comes to the front (so Properties
+        // shows the profile), else the focused area turns into one
         let shows = self.areas.root.areas();
-        if !shows.contains(&crate::areas::Shows::Profiles) {
+        if let Some(i) = shows
+            .iter()
+            .position(|s| *s == crate::areas::Shows::Profiles)
+        {
+            self.areas.focus = i;
+        } else {
             let i = self.areas.focus;
             if let Some(s) = self.areas.root.get_mut(i) {
                 *s = crate::areas::Shows::Profiles;
