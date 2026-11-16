@@ -541,10 +541,11 @@ impl CreaBimApp {
         }
     }
 
-    /// One linked file's section: its heading, reload/unlink, move
-    /// and turn, and its layers' eye, visibility, colours and line
-    /// type. Its wishes gather into `edits`; the caller applies them.
-    /// Shared by Settings › Site and the selected file's Properties.
+    /// One linked file's section: its heading, the file's eye (hide in
+    /// the active view), reload/unlink, move and turn, and its layers'
+    /// visibility, colours and line type. Its wishes gather into
+    /// `edits`; the caller applies them. Shared by Settings › Site and
+    /// the selected file's Properties.
     fn site_package_section(
         &mut self,
         ui: &mut egui::Ui,
@@ -572,6 +573,29 @@ impl CreaBimApp {
                 );
             });
             ui.horizontal(|ui| {
+                let target = self.site_target();
+                let hidden = target.is_some_and(|t| {
+                    self.view_hidden(t).is_some_and(|h| {
+                        h.elements.contains(&pkg.id)
+                    })
+                });
+                let mut eye = !hidden;
+                if ui
+                    .checkbox(&mut eye, "")
+                    .on_hover_text(format!(
+                        "Hide the whole file in {} only; each layer's box below is the project-wide visibility",
+                        self.site_target_name()
+                    ))
+                    .clicked()
+                {
+                    if let Some(t) = target {
+                        let id = pkg.id;
+                        let name = stem(&pkg.file).to_string();
+                        self.set_view_hidden(t, &format!("Site file {name}"), |h| {
+                            h.set_element(id, !eye);
+                        });
+                    }
+                }
                 if ui.small_button("Reload").clicked() {
                     edits.reload = Some(pkg.file.clone());
                 }
@@ -607,29 +631,8 @@ impl CreaBimApp {
                     edits.turn = Some((pkg.file.clone(), self.site.turn));
                 }
             });
-            ui.label(format!("Eye toggles hide in {}.", self.site_target_name()));
             for l in &mut pkg.layers {
                 ui.horizontal(|ui| {
-                    let target = self.site_target();
-                    let hidden = target.is_some_and(|t| {
-                        self.view_hidden(t).is_some_and(|h| {
-                            h.elements.contains(&pkg.id)
-                        })
-                    });
-                    let mut eye = !hidden;
-                    if ui
-                        .checkbox(&mut eye, "")
-                        .on_hover_text("Hide the whole file in the active view (or the 3D window) only")
-                        .clicked()
-                    {
-                        if let Some(t) = target {
-                            let id = pkg.id;
-                            let name = stem(&pkg.file).to_string();
-                            self.set_view_hidden(t, &format!("Site file {name}"), |h| {
-                                h.set_element(id, !eye);
-                            });
-                        }
-                    }
                     if ui
                         .checkbox(&mut l.style.visible, "")
                         .on_hover_text("Show the layer in every view (the project's own visibility)")

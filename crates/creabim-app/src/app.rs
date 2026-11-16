@@ -2449,19 +2449,49 @@ impl CreaBimApp {
                             .get(item.id)
                             .is_some_and(|e| is_framing(&e.kind)));
             if item.ghost {
-                // cutters show as their outline only
-                let c = if selected {
-                    highlight
-                } else {
-                    [0.35, 0.45, 0.75]
-                };
+                // site geography is the underlay drawn solid: its faces
+                // take the layer's colour, see-through, its edges over
+                // them. Cutters show as their outline only.
+                let site = self
+                    .doc
+                    .model()
+                    .get(item.id)
+                    .is_some_and(|e| matches!(e.kind, ElementKind::SiteFeature(_)));
                 let out = if selected {
                     &mut on_top
                 } else {
                     &mut ghost_lines
                 };
-                for &(a, b) in snaps::feature_edges_cached(&item.mesh).iter() {
-                    out.push((a, b, c));
+                if site {
+                    // the edge, as a dim of the fill: the layer's true
+                    // line colour is the plan's business
+                    let c = if selected { highlight } else { dim(item.color) };
+                    for &(a, b) in snaps::feature_edges_cached(&item.mesh).iter() {
+                        out.push((a, b, c));
+                    }
+                    if mode == crate::render3d::RenderMode::Wireframe {
+                        continue;
+                    }
+                    let base = vertices.len() as u32;
+                    let surface = [item.surface[0], item.surface[1], SITE_OPACITY];
+                    for (i, p) in item.mesh.positions.iter().enumerate() {
+                        vertices.push(Vertex {
+                            pos: *p,
+                            normal: item.mesh.normals[i],
+                            color: item.color,
+                            surface,
+                        });
+                    }
+                    see_through.extend(item.mesh.indices.iter().map(|i| i + base));
+                } else {
+                    let c = if selected {
+                        highlight
+                    } else {
+                        [0.35, 0.45, 0.75]
+                    };
+                    for &(a, b) in snaps::feature_edges_cached(&item.mesh).iter() {
+                        out.push((a, b, c));
+                    }
                 }
                 continue;
             }
@@ -11739,6 +11769,15 @@ const XRAY_OPACITY: f32 = 0.18;
 const BURIED_OPACITY: f32 = 0.5;
 /// The colour of their edges then.
 const XRAY_EDGE: [f32; 3] = [0.30, 0.34, 0.42];
+
+/// How see-through a linked site layer's faces draw in 3D: a soft
+/// underlay, still showing the model through it.
+const SITE_OPACITY: f32 = 0.45;
+
+/// A colour darkened, for an underlay's edges over its own fill.
+fn dim(c: [f32; 3]) -> [f32; 3] {
+    c.map(|v| v * 0.55)
+}
 
 fn plan_bg_color() -> Color32 {
     Color32::from_rgb(252, 252, 250)

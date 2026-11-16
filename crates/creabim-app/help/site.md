@@ -56,7 +56,7 @@ Terrain and hard landscape areas have the same grips as a slab: drag a corner or
 - **Location**: shows the project's CRS, its origin eastings/northings, and how far model-up is turned from grid north.
 - **Set zero**: click a point of the geography on a plan; it becomes the model origin (0,0), and every layer re-projects onto it at once.
 - **North line N/E/S/W**: pick a line of the geography; the project turns until it runs north, east, south or west, and every layer re-projects with it. So site and GIS stay synched around one reference point and one rotation.
-- **Per layer**: the eye hides the whole file in the active view only; the *visible* box draws the layer project-wide. **Fill** colours under the category hatch, **Line** colours the outlines and polylines, **Line type** (solid, dashed, dotted, centre, dash-dot) breaks them up.
+- **Per layer**: the eye at the top of the file's section hides the whole file in the active view only; each layer's *visible* box draws it project-wide. **Fill** colours under the category hatch, **Line** colours the outlines and polylines, **Line type** (solid, dashed, dotted, centre, dash-dot) breaks them up. In 3D the layers draw as see-through solids in their fill colour.
 - **Reload** re-reads the file and syncs by source row: changed rows update, new rows insert, vanished rows go. **Unlink** removes the whole package.
 
 BAG3D layers are 3D masses; only their 2D footprints draw for now — their 3D ingest is still to come, and reload says so rather than loading them silently.
