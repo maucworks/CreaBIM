@@ -1626,7 +1626,7 @@ impl CreaBimApp {
             }
             "units" => self.levels.units_open = true,
             "marks" => self.marks.open = true,
-            "site" => self.open_site(),
+            "site" => self.open_site_settings(None),
             "graphicstyles" => self.gstyles.open = true,
             "underlay" => {
                 if let Some((view, level)) = self.active_plan() {

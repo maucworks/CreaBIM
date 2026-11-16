@@ -312,6 +312,9 @@ pub struct CreaBimApp {
     )>,
     /// The Settings window is open.
     settings_open: bool,
+    /// The Settings tab shown (and the one the next frame shows, so
+    /// other code can open Settings on a given tab).
+    settings_tab: usize,
     /// The Project information window (A7-5).
     project_open: bool,
     /// A note open in its own big editor window (MU26).
@@ -466,6 +469,7 @@ impl CreaBimApp {
             catalogue: Default::default(),
             levels: Default::default(),
             settings_open: false,
+            settings_tab: 0,
             project_open: false,
             note_editor: None,
             copy_guides: None,
@@ -9807,10 +9811,10 @@ impl CreaBimApp {
                         let file = src.file.clone();
                         if ui
                             .button("Site layers…")
-                            .on_hover_text("Edit this file's layers: fill, line, line type, visibility")
+                            .on_hover_text("Edit this file's layers in Settings › Site: fill, line, line type, visibility")
                             .clicked()
                         {
-                            self.open_site_for(&file);
+                            self.open_site_settings(Some(file));
                         }
                     }
                 }
@@ -11558,7 +11562,6 @@ impl eframe::App for CreaBimApp {
         self.sheets_export_window(&ctx);
         self.new_project_window(&ctx);
         self.marks_window(&ctx);
-        self.site_window(&ctx);
         self.graphic_styles_window(&ctx);
         self.ground_spacing_window(&ctx);
         self.import_report_window(&ctx);

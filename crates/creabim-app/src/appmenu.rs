@@ -6,6 +6,10 @@ use super::*;
 use crate::ui_model::Item;
 use creabim_core::{LengthUnit, Units};
 
+/// Settings › Site: the linked-geography editor's tab. Named so other
+/// code can open Settings there.
+pub(super) const SITE_TAB: usize = 5;
+
 impl CreaBimApp {
     /// Closing with unsaved changes: Save, Don't save or Cancel.
     pub(super) fn close_window(&mut self, ctx: &egui::Context) {
@@ -185,7 +189,7 @@ impl CreaBimApp {
                 .hint("Your theme and the project's units"),
             Item::new("site", "Site layers…")
                 .icon("link")
-                .hint("Linked GeoPackages: link a file, edit its layers (fill, line, line type, visible), and place the project by EPSG with a picked zero and north line"),
+                .hint("Opens Settings › Site: linked GeoPackages, edit their layers (fill, line, line type, visible), and place the project by EPSG with a picked zero and north line"),
             Item::new("help:shortcuts", "Keyboard shortcuts")
                 .key("Ctrl+/")
                 .icon("keyboard"),
@@ -332,8 +336,7 @@ impl CreaBimApp {
         // as Blender's Preferences (MU39): its categories down the left, the
         // one picked on the right, scrolling, so it never grows past the
         // window as settings are added
-        let tab_id = egui::Id::new("settings.tab");
-        let mut tab: usize = ctx.data(|d| d.get_temp(tab_id)).unwrap_or(0);
+        let mut tab = self.settings_tab;
         const TABS: [(&str, &str); 7] = [
             ("Interface", "layout-panel-left"),
             ("Viewport", "box"),
@@ -613,7 +616,7 @@ impl CreaBimApp {
                     });
                 });
             });
-        ctx.data_mut(|d| d.insert_temp(tab_id, tab));
+        self.settings_tab = tab;
         self.settings_open = open;
         if !open {
             ctx.data_mut(|d| d.remove::<f64>(egui::Id::new("settings.logo.t0")));

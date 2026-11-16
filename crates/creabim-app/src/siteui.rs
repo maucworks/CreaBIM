@@ -56,10 +56,9 @@ pub fn site_packages(model: &Model) -> Vec<SitePackage> {
     out
 }
 
-/// The editor window's own state, for the session.
+/// The editor's own state, for the session.
 #[derive(Default)]
 pub(super) struct SiteUi {
-    pub open: bool,
     /// Metres to move the package by, and degrees to turn it.
     shift: [f64; 2],
     turn: f64,
@@ -69,16 +68,15 @@ pub(super) struct SiteUi {
 }
 
 impl CreaBimApp {
-    pub(super) fn open_site(&mut self) {
-        self.site.open = true;
+    /// Open Settings on the Site tab — the editor lives there, there
+    /// is no separate panel. `focus` highlights one file's section,
+    /// from its Properties.
+    pub(super) fn open_site_settings(&mut self, focus: Option<String>) {
+        self.settings_open = true;
+        self.settings_tab = super::appmenu::SITE_TAB;
+        self.site.focus = focus;
         self.site.shift = [0.0, 0.0];
         self.site.turn = 0.0;
-    }
-
-    /// Open the editor for one linked file, from its Properties.
-    pub(super) fn open_site_for(&mut self, file: &str) {
-        self.open_site();
-        self.site.focus = Some(file.to_string());
     }
 
     /// One layer's style inside the file element, written under a
@@ -435,24 +433,8 @@ impl CreaBimApp {
         self.report(r, format!("Site {} unlinked.", stem(&file)));
     }
 
-    /// The editor window: the project's location, one package section
-    /// per linked file, its layers editable.
-    pub(super) fn site_window(&mut self, ctx: &egui::Context) {
-        let mut open = self.site.open;
-        crate::app::shell::window("Site layers")
-            .open(&mut open)
-            .show(ctx, |ui| {
-                self.site_editor(ui);
-            });
-        if !open {
-            self.site.focus = None;
-        }
-        self.site.open = open;
-    }
-
-    /// The editor itself: the project location, one package section per
-    /// linked file, its layers editable. Shared by the Site layers
-    /// window and Settings › Site.
+    /// The editor: the project location, one package section per
+    /// linked file, its layers editable. Lives in Settings › Site.
     pub(super) fn site_editor(&mut self, ui: &mut egui::Ui) {
 
         let mut reload = None;
