@@ -141,12 +141,8 @@ impl CreaBimApp {
             .doc
             .model()
             .project_info()
-            .map(|(_, p)| p.clone());
-        let Some(info) = info else {
-            crate::app::diag("no project information element");
-            self.status = "The project has no project information element yet.".into();
-            return;
-        };
+            .map(|(_, p)| p.clone())
+            .unwrap_or_default();
         match info.placement() {
             None => {
                 let (cx, cy) = geo
