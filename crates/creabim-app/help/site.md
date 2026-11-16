@@ -49,13 +49,14 @@ Terrain and hard landscape areas have the same grips as a slab: drag a corner or
 
 ## Linked geography (GeoPackage)
 
-*File › Site layers…* links a GeoPackage of map geography (for example BGT or BAG) as one underlay. One homogenous element per linked file holds every layer; each draws its outlines on every plan, in its category's hatch; selecting it shows its file and per-layer feature counts. GeoPackage files stay in their own CRS: the layers are projected into model metres on load.
+*File › Import and link…* reads a GeoPackage of map geography (for example BGT or BAG) as one underlay. One homogenous element per linked file holds every layer; each draws its outlines on every plan, in its category's hatch. GeoPackage files stay in their own CRS: the layers are projected into model metres on load.
 
-- **Link GeoPackage…** reads the file and loads its layers. The first link places the project in the file's CRS, with the model origin at the extent's middle. Files in another CRS are refused — reproject them first, never on load.
+- **Linking**: pick a `.gpkg` in *File › Import and link…*. The first link places the project in the file's CRS, with the model origin at the extent's middle. Files in another CRS are refused — reproject them first, never on load.
+- **Editing**: select the linked file in the project browser — its *Properties* offer *Site layers…*, the per-layer editor (also in the *CreaBIM* menu, next to *Settings…*).
 - **Location**: shows the project's CRS, its origin eastings/northings, and how far model-up is turned from grid north.
 - **Set zero**: click a point of the geography on a plan; it becomes the model origin (0,0), and every layer re-projects onto it at once.
 - **North line N/E/S/W**: pick a line of the geography; the project turns until it runs north, east, south or west, and every layer re-projects with it. So site and GIS stay synched around one reference point and one rotation.
-- **Per layer**: the eye hides the layer in the active view only; the *visible* box draws it project-wide. **Fill** colours under the category hatch, **Line** colours the outlines and polylines, **Line type** (solid, dashed, dotted, centre, dash-dot) breaks them up.
+- **Per layer**: the eye hides the whole file in the active view only; the *visible* box draws the layer project-wide. **Fill** colours under the category hatch, **Line** colours the outlines and polylines, **Line type** (solid, dashed, dotted, centre, dash-dot) breaks them up.
 - **Reload** re-reads the file and syncs by source row: changed rows update, new rows insert, vanished rows go. **Unlink** removes the whole package.
 
 BAG3D layers are 3D masses; only their 2D footprints draw for now — their 3D ingest is still to come, and reload says so rather than loading them silently.

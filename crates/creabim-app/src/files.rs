@@ -311,12 +311,13 @@ pub fn pick_open() -> Option<String> {
             "Everything CreaBIM reads",
             &[
                 "creabim", "json", "ifc", "ifcx", "blend", "FCStd", "fcstd", "FCMat", "fcmat",
-                "gltf", "glb",
+                "gltf", "glb", "gpkg",
             ],
         )
         .add_filter("CreaBIM project", &["creabim"])
         .add_filter("IFC", &["ifc", "ifcx"])
         .add_filter("Blender and FreeCAD (linked)", &["blend", "FCStd", "fcstd"])
+        .add_filter("GeoPackage site layers (linked)", &["gpkg"])
         .add_filter(
             "Materials (FreeCAD cards, glTF)",
             &["FCMat", "fcmat", "gltf", "glb"],

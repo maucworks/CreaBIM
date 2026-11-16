@@ -63,6 +63,9 @@ pub(super) struct SiteUi {
     /// Metres to move the package by, and degrees to turn it.
     shift: [f64; 2],
     turn: f64,
+    /// The file the editor was opened for (from its Properties): its
+    /// section draws highlighted.
+    focus: Option<String>,
 }
 
 impl CreaBimApp {
@@ -70,6 +73,12 @@ impl CreaBimApp {
         self.site.open = true;
         self.site.shift = [0.0, 0.0];
         self.site.turn = 0.0;
+    }
+
+    /// Open the editor for one linked file, from its Properties.
+    pub(super) fn open_site_for(&mut self, file: &str) {
+        self.open_site();
+        self.site.focus = Some(file.to_string());
     }
 
     /// One layer's style inside the file element, written under a
@@ -100,21 +109,13 @@ impl CreaBimApp {
         self.report(r, "Layer style set: it draws so in every view.".to_string());
     }
 
-    /// A GeoPackage picked in the file dialog joins the project: the
-    /// project takes the file's CRS when it has no location yet (the
-    /// origin starts at the extent's middle), the layers load onto it,
-    /// and picking finishes the placement.
-    fn link_geopackage(&mut self) {
-        crate::app::diag("link asked");
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("GeoPackage", &["gpkg"])
-            .pick_file()
-        else {
-            crate::app::diag("no file picked (dialog cancelled or never shown)");
-            return;
-        };
-        let path = path.to_string_lossy().into_owned();
-        crate::app::diag(&format!("picked {path}"));
+    /// Link the GeoPackage at `path`: the project takes the file's CRS
+    /// when it has no location yet (the origin starts at the extent's
+    /// middle), the layers load onto it, and picking finishes the
+    /// placement. Creation lives in File › Import and link.
+    pub(super) fn link_geopackage_path(&mut self, path: &str) {
+        crate::app::diag(&format!("link {path}"));
+        let path = path.to_string();
         if self.doc.model().iter().any(|e| {
             matches!(&e.kind, ElementKind::SiteFeature(_))
                 && e.source.as_ref().is_some_and(|s| s.file == path)
@@ -442,7 +443,6 @@ impl CreaBimApp {
         let mut unlink = None;
         let mut shift: Option<(String, f64, f64)> = None;
         let mut turn: Option<(String, f64)> = None;
-        let mut link = false;
         let mut style_edits: Vec<(ElementId, String, LayerStyle)> = vec![];
         let mut pick: Option<SitePick> = None;
         crate::app::shell::window("Site layers")
@@ -450,13 +450,10 @@ impl CreaBimApp {
             .show(ctx, |ui| {
                 ui.label(
                     egui::RichText::new(
-                        "A linked GeoPackage draws as one underlay. Layers move, turn and reload together — never one drag at a time.",
+                        "A linked GeoPackage draws as one underlay. Layers move, turn and reload together — never one drag at a time. Links are created in File › Import and link….",
                     )
                     .weak(),
                 );
-                if ui.button("Link GeoPackage…").clicked() {
-                    link = true;
-                }
                 // The project's location: what every linked file and the
                 // model share — one origin, one north.
                 match self.doc.model().project_info().and_then(|(_, p)| p.placement()) {
@@ -514,8 +511,16 @@ impl CreaBimApp {
                 let mut packages = site_packages(self.doc.model());
                 for pkg in &mut packages {
                     ui.separator();
+                    let focused = self.site.focus.as_deref() == Some(pkg.file.as_str());
                     ui.horizontal(|ui| {
-                        ui.heading(stem(&pkg.file));
+                        if focused {
+                            ui.heading(
+                                egui::RichText::new(stem(&pkg.file))
+                                    .color(crate::theme::interaction()),
+                            );
+                        } else {
+                            ui.heading(stem(&pkg.file));
+                        }
                         ui.label(
                             egui::RichText::new(format!(
                                 "{} layers, {} features",
@@ -654,12 +659,9 @@ impl CreaBimApp {
                     }
                 }
                 if packages.is_empty() {
-                    ui.label("No linked site layers. Link a GeoPackage above.");
+                    ui.label("No linked site layers. Link one in File › Import and link….");
                 }
             });
-        if link {
-            self.link_geopackage();
-        }
         for (id, layer, style) in style_edits {
             self.apply_layer_style(id, &layer, style);
         }
@@ -688,6 +690,9 @@ impl CreaBimApp {
         }
         if let Some((file, deg)) = turn {
             self.rotate_site_package(&file, deg);
+        }
+        if !open {
+            self.site.focus = None;
         }
         self.site.open = open;
     }

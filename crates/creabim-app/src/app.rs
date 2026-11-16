@@ -660,6 +660,16 @@ impl CreaBimApp {
             self.reload(&full);
             return;
         }
+        // a GeoPackage links its layers as one site element, placed by
+        // the file (File › Import and link is where links are created)
+        if std::path::Path::new(&full)
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("gpkg"))
+        {
+            self.link_geopackage_path(&full);
+            return;
+        }
         match crate::files::read_incoming(&full) {
             Ok(incoming) => {
                 let (tx, report) = creabim_exchange::sync(self.doc.model(), &full, &incoming);
@@ -9794,6 +9804,14 @@ impl CreaBimApp {
                     }
                     if let Some(src) = e.source.as_ref() {
                         ui.label(egui::RichText::new(format!("Source: {}", src.file)).weak());
+                        let file = src.file.clone();
+                        if ui
+                            .button("Site layers…")
+                            .on_hover_text("Edit this file's layers: fill, line, line type, visibility")
+                            .clicked()
+                        {
+                            self.open_site_for(&file);
+                        }
                     }
                 }
                 ElementKind::Reference(r) => {
