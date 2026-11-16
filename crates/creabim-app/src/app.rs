@@ -11043,6 +11043,17 @@ fn modifier_help(k: &creabim_core::ModifierKind) -> &'static str {
 /// stderr, when it took more than 8 ms (MU37: the Profile view felt late).
 pub(crate) struct Perf(std::time::Instant, &'static str);
 
+/// Info-level diagnostics on stderr when CREABIM_DIAG is set (the
+/// Makefile's `run` target sets it): a chatty narration for flows the
+/// status bar can't explain, like a silent file dialog. Same OnceLock
+/// idiom as `Perf`.
+pub(crate) fn diag(msg: &str) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("CREABIM_DIAG").is_some()) {
+        eprintln!("creabim: {msg}");
+    }
+}
+
 impl Perf {
     pub(crate) fn new(what: &'static str) -> Self {
         Perf(std::time::Instant::now(), what)

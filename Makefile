@@ -61,7 +61,7 @@ rebuild: setup ## force relink against the bundled Python, then build (fixes sta
 	cargo build --profile $(PROFILE)
 
 run: setup ## run the app (fast profile; PROFILE=release for full optimisations)
-	cargo run --profile $(PROFILE) -p creabim-app
+	CREABIM_DIAG=1 cargo run --profile $(PROFILE) -p creabim-app
 # info-level diagnostics stay quiet unless asked: CREABIM_DIAG=1 make run
 # (errors and warnings always print; CREABIM_PERF=1 profiles slow frames)
 

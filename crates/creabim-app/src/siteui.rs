@@ -102,23 +102,37 @@ impl CreaBimApp {
     /// origin starts at the extent's middle), the layers load onto it,
     /// and picking finishes the placement.
     fn link_geopackage(&mut self) {
+        crate::app::diag("link asked");
         let Some(path) = rfd::FileDialog::new()
             .add_filter("GeoPackage", &["gpkg"])
             .pick_file()
         else {
+            crate::app::diag("no file picked (dialog cancelled or never shown)");
             return;
         };
         let path = path.to_string_lossy().into_owned();
+        crate::app::diag(&format!("picked {path}"));
         if self.doc.model().iter().any(|e| {
             matches!(&e.kind, ElementKind::SiteFeature(_))
                 && e.source.as_ref().is_some_and(|s| s.file == path)
         }) {
+            crate::app::diag("already linked");
             self.status = format!("{} is already linked.", stem(&path));
             return;
         }
         let geo = match creabim_exchange::site::file_geo(&path) {
-            Ok(g) => g,
+            Ok(g) => {
+                crate::app::diag(&format!(
+                    "file geo: {} bounds {:?}",
+                    g.crs,
+                    g.bounds.map(|(x0, y0, x1, y1)| {
+                        [x0.round(), y0.round(), x1.round(), y1.round()]
+                    })
+                ));
+                g
+            }
             Err(e) => {
+                crate::app::diag(&format!("file_geo failed: {e}"));
                 self.status = format!("Site link failed: {e}");
                 return;
             }
@@ -129,6 +143,7 @@ impl CreaBimApp {
             .project_info()
             .map(|(_, p)| p.clone());
         let Some(info) = info else {
+            crate::app::diag("no project information element");
             self.status = "The project has no project information element yet.".into();
             return;
         };
@@ -138,6 +153,7 @@ impl CreaBimApp {
                     .bounds
                     .map(|(x0, y0, x1, y1)| ((x0 + x1) / 2.0, (y0 + y1) / 2.0))
                     .unwrap_or((0.0, 0.0));
+                crate::app::diag(&format!("placing project at extent middle ({cx:.2}, {cy:.2})"));
                 let placed = ProjectInfo {
                     srid: Some(geo.crs.clone()),
                     easting: Some(cx),
@@ -148,6 +164,7 @@ impl CreaBimApp {
                 let stem = stem(&path).to_string();
                 let crs = geo.crs.clone();
                 let ok = self.doc.commit(tx).is_ok();
+                crate::app::diag(&format!("placement commit ok={ok}"));
                 self.status = if ok {
                     format!("{stem} linked: the project is placed in {crs} at the extent's middle. Pick zero and a north line to finish.")
                 } else {
@@ -155,6 +172,7 @@ impl CreaBimApp {
                 };
             }
             Some(p) if p.srid != geo.crs => {
+                crate::app::diag(&format!("CRS mismatch: file {} vs project {}", geo.crs, p.srid));
                 self.status = format!(
                     "Site link failed: {} is in {}, the project is placed in {}. Reprojecting on load is out.",
                     stem(&path),
@@ -163,7 +181,9 @@ impl CreaBimApp {
                 );
                 return;
             }
-            Some(_) => {}
+            Some(_) => {
+                crate::app::diag("project already placed, loading onto it");
+            }
         }
         self.reload_site_package(&path);
     }
@@ -176,6 +196,7 @@ impl CreaBimApp {
         let Some(hit) = self.plan.site_picked.take() else {
             return;
         };
+        crate::app::diag(&format!("pick hit: {hit:?}"));
         let info = self
             .doc
             .model()
@@ -355,14 +376,25 @@ impl CreaBimApp {
     /// Re-read one linked file and sync by source row-id.
     fn reload_site_package(&mut self, file: &str) {
         let file = file.to_string();
+        crate::app::diag(&format!("reload {file}"));
         let placement = self.doc.model().project_info().and_then(|(_, p)| p.placement());
         let Some(g) = placement else {
+            crate::app::diag("reload needs a placed project");
             self.status = "Site reload needs a placed project (project place first).".into();
             return;
         };
         match creabim_exchange::site::sync_site(self.doc.model(), &file, &g) {
             Ok((tx, report)) => {
+                crate::app::diag(&format!(
+                    "sync: {} added, {} updated, {} removed, {} unchanged, {} skipped layers",
+                    report.added,
+                    report.updated,
+                    report.removed,
+                    report.unchanged,
+                    report.skipped_layers.len()
+                ));
                 let r = self.doc.commit(tx);
+                crate::app::diag(&format!("sync commit ok={}", r.is_ok()));
                 let mut said = format!(
                     "Site {}: {} added, {} updated, {} removed.",
                     stem(&file),
@@ -382,6 +414,7 @@ impl CreaBimApp {
                 self.report(r, said);
             }
             Err(e) => {
+                crate::app::diag(&format!("sync failed: {e}"));
                 self.status = format!("Site reload failed: {e}");
             }
         }

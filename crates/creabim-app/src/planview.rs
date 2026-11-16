@@ -2865,10 +2865,12 @@ pub fn show(
         if response.clicked() {
             match snap {
                 Some(SiteSnap::Vertex(q)) => {
+                    crate::app::diag(&format!("zero picked at ({:.2}, {:.2})", q.x, q.y));
                     state.site_picked = Some(SitePickHit::Zero(q));
                     state.site_pick = None;
                 }
                 Some(SiteSnap::Edge(a, b)) => {
+                    crate::app::diag("line picked");
                     state.site_picked = Some(SitePickHit::Line(
                         match what {
                             SitePick::Line(c) => c,
@@ -2880,6 +2882,7 @@ pub fn show(
                     state.site_pick = None;
                 }
                 None => {
+                    crate::app::diag("click missed the geography");
                     state.status =
                         Some("Site: nothing of the geography under the pointer — click closer to a layer's point or line.".into());
                 }
