@@ -16,42 +16,41 @@ fn site_model() -> (Document, ElementId) {
     );
     let lid = l.id;
     doc.commit(Transaction::new("level").insert(l)).unwrap();
-    let water = Element::new(
-        "Site water",
-        ElementKind::SiteFeature(SiteFeature {
-            layer: "bgt_waterdeel".into(),
-            category: SiteCategory::Water,
-            style: LayerStyle::default(),
-            features: vec![SiteRow {
-                key: "1".into(),
-                geom: SiteGeometry::Polygon {
-                    exterior: vec![
-                        DVec2::new(0.0, 0.0),
-                        DVec2::new(4.0, 0.0),
-                        DVec2::new(4.0, 3.0),
-                        DVec2::new(0.0, 3.0),
-                    ],
-                    holes: vec![],
-                },
-            }],
-        }),
+    // one homogenous element for the file, two layers inside
+    let file = Element::new(
+        "Site site",
+        ElementKind::SiteFeature(SiteFeature::file(vec![
+            SiteLayer {
+                layer: "bgt_waterdeel".into(),
+                category: SiteCategory::Water,
+                style: LayerStyle::default(),
+                features: vec![SiteRow {
+                    key: "1".into(),
+                    geom: SiteGeometry::Polygon {
+                        exterior: vec![
+                            DVec2::new(0.0, 0.0),
+                            DVec2::new(4.0, 0.0),
+                            DVec2::new(4.0, 3.0),
+                            DVec2::new(0.0, 3.0),
+                        ],
+                        holes: vec![],
+                    },
+                }],
+            },
+            SiteLayer {
+                layer: "kadastrale_grens".into(),
+                category: SiteCategory::Boundary,
+                style: LayerStyle::default(),
+                features: vec![SiteRow {
+                    key: "2".into(),
+                    geom: SiteGeometry::Polyline {
+                        points: vec![DVec2::new(0.0, 0.0), DVec2::new(5.0, 0.0)],
+                    },
+                }],
+            },
+        ])),
     );
-    doc.commit(Transaction::new("site").insert(water)).unwrap();
-    let bound = Element::new(
-        "Site grens",
-        ElementKind::SiteFeature(SiteFeature {
-            layer: "kadastrale_grens".into(),
-            category: SiteCategory::Boundary,
-            style: LayerStyle::default(),
-            features: vec![SiteRow {
-                key: "2".into(),
-                geom: SiteGeometry::Polyline {
-                    points: vec![DVec2::new(0.0, 0.0), DVec2::new(5.0, 0.0)],
-                },
-            }],
-        }),
-    );
-    doc.commit(Transaction::new("site").insert(bound)).unwrap();
+    doc.commit(Transaction::new("site").insert(file)).unwrap();
     (doc, lid)
 }
 
@@ -73,7 +72,11 @@ fn site_polygons_fill_and_outline_on_every_plan() {
         .items
         .iter()
         .filter_map(|it| match it {
-            PlanItem::Polygon { pen, points, .. } if *pen == Pen::Projection => Some(points.len()),
+            PlanItem::Polygon {
+                pen: Pen::SiteLayer { .. },
+                points,
+                ..
+            } => Some(points.len()),
             _ => None,
         })
         .collect();
@@ -89,7 +92,7 @@ fn site_polygons_fill_and_outline_on_every_plan() {
             matches!(
                 it,
                 PlanItem::Line {
-                    pen: Pen::Projection,
+                    pen: Pen::SiteLayer { .. },
                     ..
                 }
             )
@@ -102,31 +105,26 @@ fn site_polygons_fill_and_outline_on_every_plan() {
 fn a_hidden_layer_draws_nothing_and_a_style_colours_the_fill() {
     use creabim_core::styles::Rgb;
     let (mut doc, lid) = site_model();
-    // the water gets a fill colour under its hatch
-    let water = doc
+    let file = doc
         .model()
         .iter()
-        .find(|e| e.name == "Site water")
+        .find(|e| matches!(e.kind, ElementKind::SiteFeature(_)))
         .unwrap()
         .clone();
-    let mut styled = water.clone();
+    // the water layer gets a fill colour under its hatch; the boundary
+    // layer hides project-wide — both inside the one file element
+    let mut styled = file.clone();
     if let ElementKind::SiteFeature(s) = &mut styled.kind {
-        s.style.fill = Some(Rgb([0.2, 0.4, 0.6]));
+        for l in s.layers_mut() {
+            if l.layer == "bgt_waterdeel" {
+                l.style.fill = Some(Rgb([0.2, 0.4, 0.6]));
+            }
+            if l.layer == "kadastrale_grens" {
+                l.style.visible = false;
+            }
+        }
     }
-    doc.commit(Transaction::new("site style test").replace(water, styled))
-        .unwrap();
-    // the boundary layer hides project-wide
-    let bound = doc
-        .model()
-        .iter()
-        .find(|e| e.name == "Site grens")
-        .unwrap()
-        .clone();
-    let mut hidden = bound.clone();
-    if let ElementKind::SiteFeature(s) = &mut hidden.kind {
-        s.style.visible = false;
-    }
-    doc.commit(Transaction::new("site hide test").replace(bound, hidden))
+    doc.commit(Transaction::new("site style test").replace(file, styled))
         .unwrap();
     let plan = plan_view(doc.model(), lid, 1.2);
     let fills: Vec<_> = plan
@@ -142,9 +140,23 @@ fn a_hidden_layer_draws_nothing_and_a_style_colours_the_fill() {
     assert!(
         !plan.items.iter().any(|it| matches!(
             it,
-            PlanItem::Line { pen: Pen::Projection, .. }
+            PlanItem::Line {
+                pen: Pen::SiteLayer { .. },
+                ..
+            }
         )),
         "the hidden boundary draws no polyline"
+    );
+    // the water outline draws in the layer's own pen
+    assert!(
+        plan.items.iter().any(|it| matches!(
+            it,
+            PlanItem::Polygon {
+                pen: Pen::SiteLayer { .. },
+                ..
+            }
+        )),
+        "the water outline draws in the layer pen"
     );
 }
 

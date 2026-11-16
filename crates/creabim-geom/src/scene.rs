@@ -511,42 +511,45 @@ fn build_scene_unjoined(
                 // left out of drawings and exports — the plan draws the
                 // true vectors instead. Polylines have no mesh form and
                 // stay plan-only for now. Hidden layers draw nowhere.
-                if !s.style.visible {
-                    continue;
-                }
-                for f in &s.features {
-                    let exterior = match &f.geom {
-                        creabim_core::SiteGeometry::Polygon { exterior, holes } => {
-                            let face = creabim_core::polygon::bridged(exterior, holes);
-                            if face.len() < 3 {
-                                continue;
+                for l in s.layers() {
+                    if !l.style.visible {
+                        continue;
+                    }
+                    for f in &l.features {
+                        let exterior = match &f.geom {
+                            creabim_core::SiteGeometry::Polygon { exterior, holes } => {
+                                let face = creabim_core::polygon::bridged(exterior, holes);
+                                if face.len() < 3 {
+                                    continue;
+                                }
+                                face
                             }
-                            face
-                        }
-                        _ => continue,
-                    };
-                    let mut mesh = TriMesh::default();
-                    let tris = crate::triangulate::triangulate(&exterior);
-                    let top: Vec<DVec3> = exterior.iter().map(|p| p.extend(0.0)).collect();
-                    mesh.add_polygon(&top, &tris, DVec3::Z);
-                    out.push(SceneItem {
-                        id: e.id,
-                        mesh,
-                        color: match s.category {
-                            creabim_core::SiteCategory::Parcel => [0.82, 0.80, 0.76],
-                            creabim_core::SiteCategory::Building => [0.80, 0.72, 0.64],
-                            creabim_core::SiteCategory::Road => [0.55, 0.55, 0.58],
-                            creabim_core::SiteCategory::Water => [0.45, 0.65, 0.85],
-                            creabim_core::SiteCategory::Green => [0.50, 0.72, 0.50],
-                            creabim_core::SiteCategory::Structure => [0.60, 0.60, 0.60],
-                            creabim_core::SiteCategory::Boundary => [0.70, 0.70, 0.70],
-                            creabim_core::SiteCategory::Other(_) => [0.70, 0.70, 0.70],
-                        },
-                        surface: PLAIN_SURFACE,
-                        ghost: true,
-                        layer: None,
-                        finish: None,
-                    });
+                            _ => continue,
+                        };
+                        let mut mesh = TriMesh::default();
+                        let tris = crate::triangulate::triangulate(&exterior);
+                        let top: Vec<DVec3> =
+                            exterior.iter().map(|p| p.extend(0.0)).collect();
+                        mesh.add_polygon(&top, &tris, DVec3::Z);
+                        out.push(SceneItem {
+                            id: e.id,
+                            mesh,
+                            color: match l.category {
+                                creabim_core::SiteCategory::Parcel => [0.82, 0.80, 0.76],
+                                creabim_core::SiteCategory::Building => [0.80, 0.72, 0.64],
+                                creabim_core::SiteCategory::Road => [0.55, 0.55, 0.58],
+                                creabim_core::SiteCategory::Water => [0.45, 0.65, 0.85],
+                                creabim_core::SiteCategory::Green => [0.50, 0.72, 0.50],
+                                creabim_core::SiteCategory::Structure => [0.60, 0.60, 0.60],
+                                creabim_core::SiteCategory::Boundary => [0.70, 0.70, 0.70],
+                                creabim_core::SiteCategory::Other(_) => [0.70, 0.70, 0.70],
+                            },
+                            surface: PLAIN_SURFACE,
+                            ghost: true,
+                            layer: None,
+                            finish: None,
+                        });
+                    }
                 }
                 continue;
             }

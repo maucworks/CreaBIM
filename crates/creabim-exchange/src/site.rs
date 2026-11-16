@@ -1,18 +1,24 @@
-//! Linking a GeoPackage's vector layers into the model as
-//! [`SiteFeature`](creabim_core::SiteFeature) elements — one element
-//! per source layer, features keyed by source row-id inside it.
+//! Linking a GeoPackage's vector layers into the model as one
+//! homogenous [`SiteFeature`](creabim_core::SiteFeature) element per
+//! file — its layers inside, features keyed by source row-id within
+//! them.
 //!
 //! The project's [`GeoPlacement`](creabim_core::GeoPlacement) decides
 //! the projection: every feature is transformed from the file's CRS
 //! into local metres on load (SRID mismatches fail loudly, naming
 //! the layer). Re-running on an unchanged file is a no-op (the stamp
 //! check); changed rows replace in place, new rows insert, vanished
-//! rows and layers go away with cascade.
+//! rows and layers go away. A reload rewrites the features and the
+//! categories but keeps the layers' styles: the look is the project's,
+//! not the file's.
+//!
+//! Pre-file elements (one per layer) still load; a reload merges them
+//! into the file element, keeping each layer's style.
 
 use crate::gpkg::{self, GpkgFeature, GpkgGeom};
 use creabim_core::{
     hash::StableHasher, Element, ElementKind, GeoPlacement, Model, SiteCategory, SiteFeature,
-    SiteGeometry, SiteRow, Transaction,
+    SiteGeometry, SiteLayer, SiteRow, Transaction,
 };
 use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
@@ -90,9 +96,11 @@ pub fn file_geo(path: &str) -> Result<FileGeo, String> {
     })
 }
 
-/// Load every 2D vector layer of `path` into the model, transformed by
-/// `placement`. The file must already sit in the placement's CRS —
-/// reprojecting on import is out (trap: silent datum shifts).
+/// Load every 2D vector layer of `path` into one homogenous element,
+/// transformed by `placement`. The file must already sit in the
+/// placement's CRS — reprojecting on import is out (trap: silent
+/// datum shifts). Pre-file elements for the file merge into it,
+/// keeping each layer's style.
 pub fn sync_site(
     model: &Model,
     path: &str,
@@ -104,18 +112,28 @@ pub fn sync_site(
         .srid
         .split_once(':')
         .ok_or_else(|| format!("placement srid {:?} is not ORG:ID", placement.srid))?;
-    let by_key: HashMap<String, &Element> = model
-        .iter()
-        .filter_map(|e| match &e.kind {
-            ElementKind::SiteFeature(s) => e
-                .source
-                .as_ref()
-                .filter(|src| src.file == path)
-                .map(|_| (s.layer.clone(), e)),
-            _ => None,
-        })
-        .collect();
+    // what the model already holds for the file: the file element, if
+    // any, and any pre-file leftovers, with their styles by layer
+    let mut existing: Vec<&Element> = vec![];
+    let mut styles: HashMap<String, creabim_core::LayerStyle> = HashMap::new();
+    let mut stamp: Option<u64> = None;
+    for e in model.iter() {
+        let (ElementKind::SiteFeature(s), Some(src)) = (&e.kind, &e.source) else {
+            continue;
+        };
+        if src.file != path {
+            continue;
+        }
+        existing.push(e);
+        for l in s.layers() {
+            styles.entry(l.layer.clone()).or_insert_with(|| l.style.clone());
+        }
+        if matches!(s, SiteFeature::File(_)) {
+            stamp = Some(src.stamp);
+        }
+    }
     let mut seen: HashSet<String> = HashSet::new();
+    let mut layers: Vec<SiteLayer> = vec![];
     for layer in gpkg::layers(path)? {
         if !layer.loadable {
             report.skipped_layers.push(format!(
@@ -149,77 +167,72 @@ pub fn sync_site(
             rows.push(to_row(f, placement));
         }
         rows.sort_by(|a, b| a.key.cmp(&b.key));
-        let mut h = StableHasher::new();
-        h.write(layer.name.as_bytes());
-        for r in &rows {
+        seen.insert(layer.name.clone());
+        if !styles.contains_key(&layer.name) {
+            report.added += 1;
+        }
+        layers.push(SiteLayer {
+            layer: layer.name.clone(),
+            category: SiteCategory::of_layer(&layer.name),
+            features: rows,
+            style: styles.get(&layer.name).cloned().unwrap_or_default(),
+        });
+    }
+    // layers the file no longer has go from the report (the reload
+    // drops them with the old elements)
+    for name in styles.keys() {
+        if !seen.contains(name) {
+            report.removed += 1;
+        }
+    }
+    let mut h = StableHasher::new();
+    for l in &layers {
+        h.write(l.layer.as_bytes());
+        for r in &l.features {
             h.write(r.key.as_bytes());
             h.write(format!("{:?}", r.geom).as_bytes());
         }
-        let stamp = h.finish();
-        match by_key.get(&layer.name) {
-            Some(e) if e.source.as_ref().is_some_and(|s| s.stamp == stamp) => {
-                seen.insert(layer.name.clone());
-                report.unchanged += 1;
-            }
-            Some(e) => {
-                seen.insert(layer.name.clone());
-                let before = (*e).clone();
-                let mut after = before.clone();
-                if let ElementKind::SiteFeature(s) = &mut after.kind {
-                    s.features = rows;
-                    s.category = SiteCategory::of_layer(&layer.name);
-                }
-                if let Some(src) = after.source.as_mut() {
-                    src.stamp = stamp;
-                }
-                tx = tx.replace(before, after);
-                report.updated += 1;
-            }
-            None => {
-                let mut el = Element::new(
-                    format!("Site {}", layer.name),
-                    ElementKind::SiteFeature(SiteFeature {
-                        layer: layer.name.clone(),
-                        category: SiteCategory::of_layer(&layer.name),
-                        style: creabim_core::LayerStyle::default(),
-                        features: rows,
-                    }),
-                );
-                el.source = Some(creabim_core::Source {
-                    file: path.to_string(),
-                    object: layer.name.clone(),
-                    stamp,
-                });
-                seen.insert(layer.name);
-                tx = tx.insert(el);
-                report.added += 1;
-            }
-        }
     }
-    // Layers gone from the file go from the model, unless something
-    // else being removed takes them with it.
-    let gone: Vec<creabim_core::ElementId> = by_key
-        .iter()
-        .filter(|(layer, _)| !seen.contains(*layer))
-        .map(|(_, e)| e.id)
-        .collect();
-    let gone_set: HashSet<_> = gone.iter().cloned().collect();
-    for id in gone {
-        if model
-            .get(id)
-            .is_some_and(|e| e.references().iter().any(|r| gone_set.contains(r)))
-        {
-            continue;
+    let new_stamp = h.finish();
+    if stamp == Some(new_stamp) && existing.len() == 1 {
+        report.unchanged = layers.len();
+        return Ok((tx, report));
+    }
+    if stamp != Some(new_stamp) {
+        // the file changed (or merges leftovers): every continuing
+        // layer counts as updated
+        report.updated = layers.iter().filter(|l| styles.contains_key(&l.layer)).count();
+    }
+    let mut el = Element::new(
+        format!("Site {}", file_stem(path)),
+        ElementKind::SiteFeature(SiteFeature::file(layers)),
+    );
+    el.source = Some(creabim_core::Source {
+        file: path.to_string(),
+        object: file_stem(path).to_string(),
+        stamp: new_stamp,
+    });
+    match existing.first() {
+        Some(first) => {
+            // a replace keeps the first element's identity (undo, view
+            // hiding and selection all key on it)
+            el.id = first.id;
+            tx = tx.replace((*first).clone(), el);
+            for e in existing.iter().skip(1) {
+                tx = tx.remove_cascade(model, e.id);
+                report.removed += 1;
+            }
         }
-        tx = tx.remove_cascade(model, id);
-        report.removed += 1;
+        None => {
+            tx = tx.insert(el);
+        }
     }
     Ok((tx, report))
 }
 
 fn file_stem(path: &str) -> &str {
     std::path::Path::new(path)
-        .file_name()
+        .file_stem()
         .and_then(|n| n.to_str())
         .unwrap_or(path)
 }
@@ -305,16 +318,22 @@ mod tests {
         assert_eq!((report.added, report.updated), (1, 0));
         let mut doc = Document::from_model(model);
         doc.commit(tx).unwrap();
-        let el = doc
+        // one homogenous element for the whole file
+        let els: Vec<_> = doc
             .model()
             .iter()
-            .find(|e| matches!(e.kind, ElementKind::SiteFeature(_)))
-            .expect("site layer");
+            .filter(|e| matches!(e.kind, ElementKind::SiteFeature(_)))
+            .collect();
+        assert_eq!(els.len(), 1);
+        let el = els[0];
+        assert_eq!(el.name, "Site site");
         match &el.kind {
             ElementKind::SiteFeature(s) => {
-                assert_eq!(s.layer, "wijk");
-                assert_eq!(s.features.len(), 1);
-                assert_eq!(s.features[0].key, "1");
+                assert_eq!(s.layers().len(), 1);
+                let l = &s.layers()[0];
+                assert_eq!(l.layer, "wijk");
+                assert_eq!(l.features.len(), 1);
+                assert_eq!(l.features[0].key, "1");
             }
             _ => unreachable!(),
         }
@@ -325,7 +344,7 @@ mod tests {
         };
         assert!((area - 100.0).abs() < 1e-9);
         let first = match &el.kind {
-            ElementKind::SiteFeature(s) => match &s.features[0].geom {
+            ElementKind::SiteFeature(s) => match &s.layers()[0].features[0].geom {
                 SiteGeometry::Polygon { exterior, .. } => exterior[0],
                 _ => panic!("polygon"),
             },
@@ -400,12 +419,14 @@ mod tests {
         let before = doc.model().get(id).cloned().unwrap();
         let mut styled = before.clone();
         if let ElementKind::SiteFeature(s) = &mut styled.kind {
-            s.style = LayerStyle {
-                fill: Some(Rgb([0.3, 0.5, 0.7])),
-                line: Some(Rgb([0.9, 0.1, 0.1])),
-                pattern: Some(LinePattern::Dashed),
-                visible: true,
-            };
+            for l in s.layers_mut() {
+                l.style = LayerStyle {
+                    fill: Some(Rgb([0.3, 0.5, 0.7])),
+                    line: Some(Rgb([0.9, 0.1, 0.1])),
+                    pattern: Some(LinePattern::Dashed),
+                    visible: true,
+                };
+            }
         }
         doc.commit(Transaction::new("site style site.gpkg").replace(before, styled))
             .unwrap();
@@ -413,7 +434,7 @@ mod tests {
         let (tx, report) = sync_site(doc.model(), &path, &g).unwrap();
         assert_eq!(report.unchanged, 1, "an unchanged file must not rewrite");
         assert!(tx.ops.is_empty());
-        // now force a change: the layer's stamp differs only when rows do;
+        // now force a change: the file's stamp differs only when rows do;
         // so restamp by hand and sync again — the point is the same path
         let before = doc.model().get(id).cloned().unwrap();
         let mut bumped = before.clone();
@@ -428,8 +449,60 @@ mod tests {
         let el = doc.model().get(id).unwrap();
         match &el.kind {
             ElementKind::SiteFeature(s) => {
-                assert_eq!(s.style.line, Some(Rgb([0.9, 0.1, 0.1])));
-                assert_eq!(s.style.pattern, Some(LinePattern::Dashed));
+                assert_eq!(s.layers().len(), 1);
+                assert_eq!(s.layers()[0].style.line, Some(Rgb([0.9, 0.1, 0.1])));
+                assert_eq!(
+                    s.layers()[0].style.pattern,
+                    Some(LinePattern::Dashed)
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn pre_file_elements_merge_into_one_file() {
+        use creabim_core::styles::Rgb;
+        use creabim_core::{Element, LayerStyle, SiteLayer, Source};
+        let (_dir, path, g) = test_gpkg("merge");
+        let mut doc = Document::from_model(Model::new());
+        // the old shape: one element per layer, one of them styled
+        let mut first = Element::new(
+            "Site wijk",
+            ElementKind::SiteFeature(SiteFeature::Layer(SiteLayer {
+                layer: "wijk".into(),
+                category: SiteCategory::Road,
+                features: vec![],
+                style: LayerStyle {
+                    fill: Some(Rgb([0.1, 0.2, 0.3])),
+                    ..LayerStyle::default()
+                },
+            })),
+        );
+        first.source = Some(Source {
+            file: path.clone(),
+            object: "wijk".into(),
+            stamp: 7,
+        });
+        doc.commit(Transaction::new("old link").insert(first)).unwrap();
+        let (tx, _) = sync_site(doc.model(), &path, &g).unwrap();
+        doc.commit(tx).unwrap();
+        let els: Vec<_> = doc
+            .model()
+            .iter()
+            .filter(|e| matches!(e.kind, ElementKind::SiteFeature(_)))
+            .collect();
+        assert_eq!(els.len(), 1, "one homogenous element per file");
+        match &els[0].kind {
+            ElementKind::SiteFeature(s) => {
+                assert!(matches!(s, SiteFeature::File(_)));
+                assert_eq!(s.layers().len(), 1);
+                // the old layer's style survived the merge
+                assert_eq!(
+                    s.layers()[0].style.fill,
+                    Some(Rgb([0.1, 0.2, 0.3]))
+                );
+                assert_eq!(s.layers()[0].features.len(), 1);
             }
             _ => unreachable!(),
         }

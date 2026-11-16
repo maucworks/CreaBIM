@@ -12,14 +12,15 @@ use super::*;
 use creabim_core::{Cardinal, LayerStyle, ProjectInfo, SiteGeometry};
 use creabim_core::styles::{LinePattern, Rgb};
 
-/// One linked file's layers, grouped for the editor.
+/// One linked file's layers, for the editor: the file element and
+/// its layers in load order.
 pub struct SitePackage {
     pub file: String,
-    pub layers: Vec<SiteLayer>,
+    pub id: ElementId,
+    pub layers: Vec<SiteLayerRow>,
 }
 
-pub struct SiteLayer {
-    pub id: ElementId,
+pub struct SiteLayerRow {
     pub name: String,
     pub category: String,
     pub features: usize,
@@ -28,30 +29,28 @@ pub struct SiteLayer {
     pub style: LayerStyle,
 }
 
-/// The linked packages in the model, layers in model order.
+/// The linked files in the model, in model order: one homogenous
+/// element per file.
 pub fn site_packages(model: &Model) -> Vec<SitePackage> {
     let mut out: Vec<SitePackage> = vec![];
     for e in model.iter() {
         let (ElementKind::SiteFeature(s), Some(src)) = (&e.kind, &e.source) else {
             continue;
         };
-        let pkg = match out.iter_mut().find(|p| p.file == src.file) {
-            Some(p) => p,
-            None => {
-                out.push(SitePackage {
-                    file: src.file.clone(),
-                    layers: vec![],
-                });
-                out.last_mut().unwrap()
-            }
-        };
-        pkg.layers.push(SiteLayer {
+        out.push(SitePackage {
+            file: src.file.clone(),
             id: e.id,
-            name: e.name.clone(),
-            category: format!("{:?}", s.category),
-            features: s.features.len(),
-            area: s.area(),
-            style: s.style.clone(),
+            layers: s
+                .layers()
+                .iter()
+                .map(|l| SiteLayerRow {
+                    name: l.layer.clone(),
+                    category: format!("{:?}", l.category),
+                    features: l.features.len(),
+                    area: l.area(),
+                    style: l.style.clone(),
+                })
+                .collect(),
         });
     }
     out
@@ -73,23 +72,27 @@ impl CreaBimApp {
         self.site.turn = 0.0;
     }
 
-    /// One layer's style, written under a `site …` label: the only
-    /// writes the commit guard lets through for linked layers.
-    fn apply_layer_style(&mut self, id: ElementId, style: LayerStyle) {
+    /// One layer's style inside the file element, written under a
+    /// `site …` label: the only writes the commit guard lets through
+    /// for linked geography.
+    fn apply_layer_style(&mut self, id: ElementId, layer: &str, style: LayerStyle) {
         let Some(e) = self.doc.model().get(id).cloned() else {
             return;
         };
         let mut after = e.clone();
         if let ElementKind::SiteFeature(s) = &mut after.kind {
-            s.style = style;
+            let Some(l) = s.layers_mut().into_iter().find(|l| l.layer == layer) else {
+                return;
+            };
+            l.style = style;
         }
         let file = e
             .source
             .as_ref()
             .map(|s| stem(&s.file).to_string())
             .unwrap_or_default();
-        let tx = creabim_core::Transaction::new(format!("site style {file}"))
-            .replace(e, after);
+        let tx =
+            creabim_core::Transaction::new(format!("site style {file}")).replace(e, after);
         let r = self.doc.commit(tx);
         self.report(r, "Layer style set: it draws so in every view.".to_string());
     }
@@ -282,17 +285,19 @@ impl CreaBimApp {
             }
             let mut after = e.clone();
             if let ElementKind::SiteFeature(ns) = &mut after.kind {
-                for f in &mut ns.features {
-                    let at = |p: DVec2| DVec2::new(p.x + dx, p.y + dy);
-                    match &mut f.geom {
-                        SiteGeometry::Polygon { exterior, holes } => {
-                            exterior.iter_mut().for_each(|p| *p = at(*p));
-                            for h in holes {
-                                h.iter_mut().for_each(|p| *p = at(*p));
+                for l in ns.layers_mut() {
+                    for f in &mut l.features {
+                        let at = |p: DVec2| DVec2::new(p.x + dx, p.y + dy);
+                        match &mut f.geom {
+                            SiteGeometry::Polygon { exterior, holes } => {
+                                exterior.iter_mut().for_each(|p| *p = at(*p));
+                                for h in holes {
+                                    h.iter_mut().for_each(|p| *p = at(*p));
+                                }
                             }
-                        }
-                        SiteGeometry::Polyline { points } => {
-                            points.iter_mut().for_each(|p| *p = at(*p));
+                            SiteGeometry::Polyline { points } => {
+                                points.iter_mut().for_each(|p| *p = at(*p));
+                            }
                         }
                     }
                 }
@@ -321,17 +326,19 @@ impl CreaBimApp {
             }
             let mut after = e.clone();
             if let ElementKind::SiteFeature(ns) = &mut after.kind {
-                for f in &mut ns.features {
-                    let at = |p: DVec2| DVec2::new(p.x * c - p.y * s, p.x * s + p.y * c);
-                    match &mut f.geom {
-                        SiteGeometry::Polygon { exterior, holes } => {
-                            exterior.iter_mut().for_each(|p| *p = at(*p));
-                            for h in holes {
-                                h.iter_mut().for_each(|p| *p = at(*p));
+                for l in ns.layers_mut() {
+                    for f in &mut l.features {
+                        let at = |p: DVec2| DVec2::new(p.x * c - p.y * s, p.x * s + p.y * c);
+                        match &mut f.geom {
+                            SiteGeometry::Polygon { exterior, holes } => {
+                                exterior.iter_mut().for_each(|p| *p = at(*p));
+                                for h in holes {
+                                    h.iter_mut().for_each(|p| *p = at(*p));
+                                }
                             }
-                        }
-                        SiteGeometry::Polyline { points } => {
-                            points.iter_mut().for_each(|p| *p = at(*p));
+                            SiteGeometry::Polyline { points } => {
+                                points.iter_mut().for_each(|p| *p = at(*p));
+                            }
                         }
                     }
                 }
@@ -404,7 +411,7 @@ impl CreaBimApp {
         let mut shift: Option<(String, f64, f64)> = None;
         let mut turn: Option<(String, f64)> = None;
         let mut link = false;
-        let mut style_edits: Vec<(ElementId, LayerStyle)> = vec![];
+        let mut style_edits: Vec<(ElementId, String, LayerStyle)> = vec![];
         let mut pick: Option<SitePick> = None;
         crate::app::shell::window("Site layers")
             .open(&mut open)
@@ -528,19 +535,19 @@ impl CreaBimApp {
                             let target = self.site_target();
                             let hidden = target.is_some_and(|t| {
                                 self.view_hidden(t).is_some_and(|h| {
-                                    h.elements.contains(&l.id)
+                                    h.elements.contains(&pkg.id)
                                 })
                             });
                             let mut eye = !hidden;
                             if ui
                                 .checkbox(&mut eye, "")
-                                .on_hover_text("Hide in the active view (or the 3D window) only")
+                                .on_hover_text("Hide the whole file in the active view (or the 3D window) only")
                                 .clicked()
                             {
                                 if let Some(t) = target {
-                                    let id = l.id;
-                                    let name = l.name.clone();
-                                    self.set_view_hidden(t, &format!("Site layer {name}"), |h| {
+                                    let id = pkg.id;
+                                    let name = stem(&pkg.file).to_string();
+                                    self.set_view_hidden(t, &format!("Site file {name}"), |h| {
                                         h.set_element(id, !eye);
                                     });
                                 }
@@ -550,13 +557,14 @@ impl CreaBimApp {
                                 .on_hover_text("Show the layer in every view (the project's own visibility)")
                                 .changed()
                             {
-                                style_edits.push((l.id, l.style.clone()));
+                                style_edits.push((pkg.id, l.name.clone(), l.style.clone()));
                             }
                             ui.label(format!(
                                 "{} · {} · {} · {:.0} m²",
                                 l.name, l.category, l.features, l.area
                             ));
                         });
+                        let layer_name = l.name.clone();
                         ui.horizontal(|ui| {
                             ui.label("Fill");
                             let mut fill = srgb(l.style.fill);
@@ -566,7 +574,7 @@ impl CreaBimApp {
                                 .changed()
                             {
                                 l.style.fill = rgb(fill);
-                                style_edits.push((l.id, l.style.clone()));
+                                style_edits.push((pkg.id, layer_name.clone(), l.style.clone()));
                             }
                             ui.label("Line");
                             let mut line = srgb(l.style.line);
@@ -576,11 +584,11 @@ impl CreaBimApp {
                                 .changed()
                             {
                                 l.style.line = rgb(line);
-                                style_edits.push((l.id, l.style.clone()));
+                                style_edits.push((pkg.id, layer_name.clone(), l.style.clone()));
                             }
                             ui.label("Line type");
                             let mut pattern = l.style.pattern.clone();
-                            egui::ComboBox::from_id_salt(("site.line", l.id))
+                            egui::ComboBox::from_id_salt(("site.line", (pkg.id, l.name.clone())))
                                 .selected_text(
                                     pattern
                                         .as_ref()
@@ -608,7 +616,7 @@ impl CreaBimApp {
                                 });
                             if pattern != l.style.pattern {
                                 l.style.pattern = pattern;
-                                style_edits.push((l.id, l.style.clone()));
+                                style_edits.push((pkg.id, layer_name.clone(), l.style.clone()));
                             }
                         });
                     }
@@ -620,8 +628,8 @@ impl CreaBimApp {
         if link {
             self.link_geopackage();
         }
-        for (id, style) in style_edits {
-            self.apply_layer_style(id, style);
+        for (id, layer, style) in style_edits {
+            self.apply_layer_style(id, &layer, style);
         }
         if let Some(p) = pick {
             self.plan.site_pick = Some(p);

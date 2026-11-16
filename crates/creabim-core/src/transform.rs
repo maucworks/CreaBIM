@@ -170,8 +170,10 @@ pub fn transformed(model: &Model, e: &Element, t: &Xform) -> Option<Element> {
         // data makes no sense, like a grid
         ElementKind::SiteFeature(s) => match t {
             Xform::Move(_) | Xform::Rotate { .. } => {
-                for f in &mut s.features {
-                    f.geom.map(|p| t.point2(p));
+                for l in s.layers_mut() {
+                    for f in &mut l.features {
+                        f.geom.map(|p| t.point2(p));
+                    }
                 }
             }
             _ => return None,

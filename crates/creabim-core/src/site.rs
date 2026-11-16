@@ -760,9 +760,10 @@ pub struct SiteRow {
     pub geom: SiteGeometry,
 }
 
-/// One source layer's worth of site geography.
+/// One source layer's worth of site geography: its features keyed by
+/// source row-id, its category, and how it draws.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SiteFeature {
+pub struct SiteLayer {
     /// The source layer name (what the registry and sync match on).
     pub layer: String,
     pub category: SiteCategory,
@@ -774,10 +775,84 @@ pub struct SiteFeature {
     pub style: LayerStyle,
 }
 
+/// One linked file's worth of site geography: every layer it loaded,
+///
+/// One homogenous element per GeoPackage file. A separate layer editor
+/// (colours, line type, visibility) works on the layers inside; the
+/// element moves, reloads and unlinks as one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SiteFile {
+    pub layers: Vec<SiteLayer>,
+}
+
+/// Loaded map geography: one homogenous element per GeoPackage file.
+///
+/// `File` is the shape; `Layer` is the pre-file shape (one element per
+/// source layer), kept so saved projects still open. It draws like a
+/// one-layer file, and a reload merges it into the file element,
+/// keeping its style.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SiteFeature {
+    File(SiteFile),
+    Layer(SiteLayer),
+}
+
+impl SiteFeature {
+    /// A new file element from loaded layers.
+    pub fn file(layers: Vec<SiteLayer>) -> Self {
+        SiteFeature::File(SiteFile { layers })
+    }
+
+    /// Every layer, whatever the shape.
+    pub fn layers(&self) -> &[SiteLayer] {
+        match self {
+            SiteFeature::File(f) => &f.layers,
+            SiteFeature::Layer(l) => std::slice::from_ref(l),
+        }
+    }
+
+    /// Every layer, mutably.
+    pub fn layers_mut(&mut self) -> Vec<&mut SiteLayer> {
+        match self {
+            SiteFeature::File(f) => f.layers.iter_mut().collect(),
+            SiteFeature::Layer(l) => vec![l],
+        }
+    }
+
+    /// The style of the layer called `name`, if it is here.
+    pub fn style_of(&self, name: &str) -> Option<LayerStyle> {
+        self.layers()
+            .iter()
+            .find(|l| l.layer == name)
+            .map(|l| l.style.clone())
+    }
+
+    /// The plan area, in square metres (polygons only), over all layers.
+    pub fn area(&self) -> f64 {
+        self.layers().iter().map(SiteLayer::area).sum()
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let mut seen = std::collections::HashSet::new();
+        for l in self.layers() {
+            if !seen.insert(l.layer.clone()) {
+                return Err(format!("site layer {:?} is listed twice", l.layer));
+            }
+            l.validate()?;
+        }
+        Ok(())
+    }
+
+    /// True when every layer draws as its category does.
+    pub fn is_default_style(&self) -> bool {
+        self.layers().iter().all(|l| l.style.is_default())
+    }
+}
+
 /// How one linked layer draws: its fill and line colours, its line
 /// pattern, whether it shows at all. What is left out draws as the
-/// category does. (Hiding single rows of a layer — a neighbour's
-/// extension you don't want — is a `hidden_rows` list here later.)
+/// category does.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LayerStyle {
     /// Under the category hatch; none keeps the hatch's own.
@@ -814,7 +889,7 @@ impl LayerStyle {
     }
 }
 
-impl SiteFeature {
+impl SiteLayer {
     pub fn validate(&self) -> Result<(), String> {
         if self.layer.is_empty() {
             return Err("a site layer needs a name".into());
@@ -873,30 +948,32 @@ mod site_feature_tests {
         }
         .validate()
         .is_err());
-        let mut s = SiteFeature {
+        let mut s = SiteFeature::file(vec![SiteLayer {
             layer: "".into(),
             category: SiteCategory::Parcel,
             features: vec![],
             style: LayerStyle::default(),
-        };
+        }]);
         assert!(s.validate().is_err());
-        s.layer = "perceel".into();
-        s.features = vec![
-            SiteRow {
-                key: "1".into(),
-                geom: poly(4),
-            },
-            SiteRow {
-                key: "1".into(),
-                geom: poly(4),
-            },
-        ];
+        if let SiteFeature::File(f) = &mut s {
+            f.layers[0].layer = "perceel".into();
+            f.layers[0].features = vec![
+                SiteRow {
+                    key: "1".into(),
+                    geom: poly(4),
+                },
+                SiteRow {
+                    key: "1".into(),
+                    geom: poly(4),
+                },
+            ];
+        }
         assert!(s.validate().is_err());
     }
 
     #[test]
     fn area_counts_polygons_minus_holes() {
-        let s = SiteFeature {
+        let s = SiteFeature::file(vec![SiteLayer {
             layer: "x".into(),
             category: SiteCategory::Parcel,
             style: LayerStyle::default(),
@@ -917,7 +994,7 @@ mod site_feature_tests {
                     ]],
                 },
             }],
-        };
+        }]);
         assert!((s.area() - 11.0).abs() < 1e-9);
     }
 
@@ -939,9 +1016,10 @@ mod site_feature_tests {
     fn linked_layer() -> (crate::Document, crate::ElementId) {
         use crate::{Document, Element, ElementKind, Model, Source, Transaction};
         let mut doc = Document::from_model(Model::new());
+        // the pre-file shape: one element per layer, still loads
         let mut el = Element::new(
             "Site bgt_wegdeel",
-            ElementKind::SiteFeature(SiteFeature {
+            ElementKind::SiteFeature(SiteFeature::Layer(SiteLayer {
                 layer: "bgt_wegdeel".into(),
                 category: SiteCategory::Road,
                 style: LayerStyle::default(),
@@ -949,7 +1027,7 @@ mod site_feature_tests {
                     key: "1".into(),
                     geom: poly(4),
                 }],
-            }),
+            })),
         );
         el.source = Some(Source {
             file: "site.gpkg".into(),
@@ -988,16 +1066,21 @@ mod site_feature_tests {
 
     #[test]
     fn a_style_survives_and_old_files_load() {
-        // a layer saved before LayerStyle existed: no `style` in the JSON
+        // a layer saved before LayerStyle existed: no `style`, and the
+        // pre-file shape — one element per layer — loads as `Layer`
         let old = r#"{"layer":"wijk","category":"Road","features":[{"key":"1",
             "geom":{"Polygon":{"exterior":[[0,0],[10,0],[10,10]]}}}]}"#;
         let s: SiteFeature = serde_json::from_str(old).unwrap();
-        assert_eq!(s.style, LayerStyle::default());
+        let SiteFeature::Layer(l) = &s else {
+            panic!("old shape loads as a layer: {s:?}");
+        };
+        assert_eq!(l.style, LayerStyle::default());
+        assert_eq!(l.layer, "wijk");
         let round: SiteFeature =
             serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(round, s);
-        // a styled one keeps its style through the round trip
-        let styled = SiteFeature {
+        // a styled file keeps its styles through the round trip
+        let styled = SiteFeature::file(vec![SiteLayer {
             layer: "wijk".into(),
             category: SiteCategory::Road,
             style: LayerStyle {
@@ -1006,11 +1089,11 @@ mod site_feature_tests {
                 pattern: Some(LinePattern::Dashed),
                 visible: false,
             },
-            features: s.features,
-        };
+            features: l.features.clone(),
+        }]);
         let back: SiteFeature =
             serde_json::from_str(&serde_json::to_string(&styled).unwrap()).unwrap();
         assert_eq!(back, styled);
-        assert!(!back.style.is_default());
+        assert!(!back.is_default_style());
     }
 }

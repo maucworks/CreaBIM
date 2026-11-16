@@ -180,6 +180,12 @@ pub fn pen_stroke_with(pen: Pen, w: &LineWeights) -> Stroke {
             width: w.hatch,
             ..HATCH
         },
+        // a site layer's own linework prints like projection lines; its
+        // colour and line type are the screen's (sheets keep the pen's)
+        Pen::SiteLayer { .. } => Stroke {
+            width: w.projection,
+            ..PROJECTION
+        },
     }
 }
 

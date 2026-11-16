@@ -1166,19 +1166,8 @@ pub fn show(
     let ghost = state.spotlight_ghost && !state.spotlight.is_empty();
     let mut faint = painter.clone();
     faint.set_opacity(0.22);
-    // the view's graphic overrides, as on its sheets (MU27), with the
-    // linked site layers' own styles underneath: a view that colours a
-    // layer wins, else the layer draws as its editor set it
-    let mut overrides = view_overrides(doc.model(), view);
-    for (id, style) in layer_style_overrides(doc.model()) {
-        let o = overrides.entry(id).or_default();
-        if o.colour.is_none() {
-            o.colour = style.colour;
-        }
-        if !o.dashed {
-            o.pattern = style.pattern;
-        }
-    }
+    // the view's graphic overrides, as on its sheets (MU27)
+    let overrides = view_overrides(doc.model(), view);
     for item in &plan.items {
         let lit = state.spotlight.contains(&item.id());
         let selected = selection.contains(item.id()) || lit;
@@ -5650,38 +5639,6 @@ pub fn view_overrides(model: &creabim_core::Model, view: ElementId) -> HashMap<E
     out
 }
 
-/// How each linked site layer draws on its own: what its editor set
-/// per layer — line colour, line pattern. The plan's fill colour rides
-/// the item itself; visibility is a no-items layer. Empty when no
-/// layer is styled.
-pub fn layer_style_overrides(
-    model: &creabim_core::Model,
-) -> HashMap<ElementId, Ovr> {
-    use creabim_core::styles::LinePattern;
-    let mut out = HashMap::new();
-    for e in model.iter() {
-        let ElementKind::SiteFeature(s) = &e.kind else {
-            continue;
-        };
-        if s.style.is_default() {
-            continue;
-        }
-        let mut r = Ovr::default();
-        if let Some(c) = s.style.line {
-            r.colour = Some(Color32::from_rgb(
-                (c.0[0] * 255.0) as u8,
-                (c.0[1] * 255.0) as u8,
-                (c.0[2] * 255.0) as u8,
-            ));
-        }
-        if let Some(pat) = &s.style.pattern {
-            r.pattern = (!matches!(pat, LinePattern::Solid)).then(|| pat.clone());
-        }
-        out.insert(e.id, r);
-    }
-    out
-}
-
 /// What the site editor asks a plan click for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SitePick {
@@ -5725,31 +5682,33 @@ fn site_snap(
         let ElementKind::SiteFeature(s) = &e.kind else {
             continue;
         };
-        if !s.style.visible {
-            continue;
-        }
-        for f in &s.features {
-            let (rings, closed): (Vec<&Vec<DVec2>>, bool) = match &f.geom {
-                SiteGeometry::Polygon { exterior, holes } => {
-                    let mut r = vec![exterior];
-                    r.extend(holes.iter());
-                    (r, true)
-                }
-                SiteGeometry::Polyline { points } => (vec![points], false),
-            };
-            if !line {
-                for ring in &rings {
-                    for q in ring.iter() {
-                        keep(q.distance(p), SiteSnap::Vertex(*q), &mut best);
+        for l in s.layers() {
+            if !l.style.visible {
+                continue;
+            }
+            for f in &l.features {
+                let (rings, closed): (Vec<&Vec<DVec2>>, bool) = match &f.geom {
+                    SiteGeometry::Polygon { exterior, holes } => {
+                        let mut r = vec![exterior];
+                        r.extend(holes.iter());
+                        (r, true)
                     }
-                }
-            } else {
-                for ring in &rings {
-                    let n = ring.len();
-                    let last = if closed { n } else { n.saturating_sub(1) };
-                    for i in 0..last {
-                        let (a, b) = (ring[i], ring[(i + 1) % n]);
-                        keep(seg_dist(p, a, b), SiteSnap::Edge(a, b), &mut best);
+                    SiteGeometry::Polyline { points } => (vec![points], false),
+                };
+                if !line {
+                    for ring in &rings {
+                        for q in ring.iter() {
+                            keep(q.distance(p), SiteSnap::Vertex(*q), &mut best);
+                        }
+                    }
+                } else {
+                    for ring in &rings {
+                        let n = ring.len();
+                        let last = if closed { n } else { n.saturating_sub(1) };
+                        for i in 0..last {
+                            let (a, b) = (ring[i], ring[(i + 1) % n]);
+                            keep(seg_dist(p, a, b), SiteSnap::Edge(a, b), &mut best);
+                        }
                     }
                 }
             }
@@ -5809,6 +5768,50 @@ fn pattern_segments(
             at = end + off;
             i += 2;
         }
+    }
+}
+
+/// How a site layer's outline dashes: the view's line pattern first,
+/// its plain dashed next, then the layer's own line type.
+enum SiteDashes {
+    Solid,
+    Plain,
+    Pattern(Vec<f64>),
+}
+
+fn site_dashes(pattern: Option<u8>, o: &Ovr) -> SiteDashes {
+    if let Some(p) = &o.pattern {
+        return match p.dashes() {
+            Some(d) => SiteDashes::Pattern(d),
+            None => SiteDashes::Solid,
+        };
+    }
+    if o.dashed {
+        return SiteDashes::Plain;
+    }
+    match creabim_geom::plan::site_line_pattern(pattern).dashes() {
+        Some(d) => SiteDashes::Pattern(d),
+        None => SiteDashes::Solid,
+    }
+}
+
+/// A site layer's colour: selected highlights, else a view override,
+/// else the layer's own, else the pen's default.
+fn site_colour(
+    rgb: Option<[f32; 3]>,
+    selected: bool,
+    o: &Ovr,
+    highlight: Color32,
+    fallback: Color32,
+) -> Color32 {
+    if selected {
+        highlight
+    } else if let Some(c) = o.colour {
+        c
+    } else if let Some([r, g, b]) = rgb {
+        Color32::from_rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
+    } else {
+        fallback
     }
 }
 
@@ -5881,6 +5884,35 @@ pub fn draw_item_with(
                             fill,
                             Stroke::new(1.6 * o.cut, ink),
                         ));
+                    }
+                }
+                Pen::SiteLayer { rgb, pattern } => {
+                    let (w, base) = if selected {
+                        (2.0, highlight)
+                    } else {
+                        (1.0 * o.proj, grey(120))
+                    };
+                    let c = site_colour(*rgb, selected, o, highlight, base);
+                    let stroke = Stroke::new(w, c);
+                    match site_dashes(*pattern, o) {
+                        SiteDashes::Pattern(dashes) => {
+                            let segs: Vec<[Pos2; 2]> = (0..pts.len())
+                                .map(|i| [pts[i], pts[(i + 1) % pts.len()]])
+                                .collect();
+                            pattern_segments(
+                                painter,
+                                &segs,
+                                stroke,
+                                &dashes,
+                                mm * xf.scale as f64,
+                            );
+                        }
+                        SiteDashes::Plain => {
+                            painter.extend(egui::Shape::dashed_line(&pts, stroke, 6.0, 4.0));
+                        }
+                        SiteDashes::Solid => {
+                            painter.add(egui::Shape::closed_line(pts, stroke));
+                        }
                     }
                 }
                 _ => {
@@ -5967,6 +5999,37 @@ pub fn draw_item_with(
                         ));
                     } else {
                         painter.line_segment([a, b], Stroke::new(1.8 * o.cut, ink));
+                    }
+                }
+                Pen::SiteLayer { rgb, pattern } => {
+                    let (w, base) = if selected {
+                        (2.0, highlight)
+                    } else {
+                        (1.0 * o.proj, grey(120))
+                    };
+                    let c = site_colour(*rgb, selected, o, highlight, base);
+                    let stroke = Stroke::new(w, c);
+                    match site_dashes(*pattern, o) {
+                        SiteDashes::Pattern(dashes) => {
+                            pattern_segments(
+                                painter,
+                                &[[a, b]],
+                                stroke,
+                                &dashes,
+                                mm * xf.scale as f64,
+                            );
+                        }
+                        SiteDashes::Plain => {
+                            painter.extend(egui::Shape::dashed_line(
+                                &[a, b],
+                                stroke,
+                                6.0,
+                                4.0,
+                            ));
+                        }
+                        SiteDashes::Solid => {
+                            painter.line_segment([a, b], stroke);
+                        }
                     }
                 }
                 Pen::Hidden => {

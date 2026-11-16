@@ -70,8 +70,9 @@ usage: (<model> is a .creabim project or a legacy .creabim.json file)
                                        with row counts and geometry kinds
   creabim site load <model> <file.gpkg> [--out <model>]
                                        link the GeoPackage's 2D vector
-                                       layers into the model as SiteFeature
-                                       elements (one per layer, features
+                                       layers into the model as one
+                                       homogenous SiteFeature element per
+                                       file (layers inside, features
                                        keyed by source row), projected to
                                        local metres; re-runs sync by key
   creabim script list <model>          list the model's script blocks
@@ -970,7 +971,7 @@ fn site_layers(file: &str) -> Result<(), String> {
 }
 
 /// `site load`: link a GeoPackage's 2D vector layers into the model as
-/// one SiteFeature element per layer, projected to local metres. Needs
+/// one homogenous SiteFeature element per file, projected to local metres. Needs
 /// a placed project (`project place`); re-runs sync by source row-id.
 fn site_load(input: &str, file: &str, rest: &[&str]) -> Result<(), String> {
     let mut out = input.to_string();

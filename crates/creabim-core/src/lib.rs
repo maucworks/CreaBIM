@@ -124,7 +124,8 @@ pub use script::{
     ScriptObject, ScriptOutput, ScriptRegistry,
 };
 pub use site::{
-    LayerStyle, PlantForm, Site, SiteCategory, SiteFeature, SiteForm, SiteGeometry, SiteRow,
+    LayerStyle, PlantForm, Site, SiteCategory, SiteFeature, SiteFile, SiteForm, SiteGeometry,
+    SiteLayer, SiteRow,
 };
 pub use sketch::{bulge_through, Circle, Curve, SegmentKind};
 pub use slab::{room_outline, slab_from_sketch, Shaft};

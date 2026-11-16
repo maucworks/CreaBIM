@@ -49,7 +49,7 @@ Terrain and hard landscape areas have the same grips as a slab: drag a corner or
 
 ## Linked geography (GeoPackage)
 
-*File › Site layers…* links a GeoPackage of map geography (for example BGT or BAG) as one underlay. One element per source layer draws its outlines on every plan, in its category's hatch; selecting one shows its layer, category and feature count. GeoPackage files stay in their own CRS: the layers are projected into model metres on load.
+*File › Site layers…* links a GeoPackage of map geography (for example BGT or BAG) as one underlay. One homogenous element per linked file holds every layer; each draws its outlines on every plan, in its category's hatch; selecting it shows its file and per-layer feature counts. GeoPackage files stay in their own CRS: the layers are projected into model metres on load.
 
 - **Link GeoPackage…** reads the file and loads its layers. The first link places the project in the file's CRS, with the model origin at the extent's middle. Files in another CRS are refused — reproject them first, never on load.
 - **Location**: shows the project's CRS, its origin eastings/northings, and how far model-up is turned from grid north.

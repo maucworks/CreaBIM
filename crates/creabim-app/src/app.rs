@@ -9779,15 +9779,19 @@ impl CreaBimApp {
                 }
                 ElementKind::SiteFeature(s) => {
                     // Loaded geography: read-only here, refreshed from
-                    // its GeoPackage with `site load`; category edits
-                    // happen there too, so a reload never fights them.
-                    ui.label(format!("Layer: {}", s.layer));
-                    ui.label(format!("Category: {:?}", s.category));
-                    ui.label(format!(
-                        "Features: {} ({:.0} m²)",
-                        s.features.len(),
-                        s.area()
-                    ));
+                    // its GeoPackage; per-layer colours and visibility
+                    // live in the Site layers editor, so a reload never
+                    // fights them.
+                    ui.label(format!("Layers: {}", s.layers().len()));
+                    for l in s.layers() {
+                        ui.label(format!(
+                            "{} · {:?} · {} · {:.0} m²",
+                            l.layer,
+                            l.category,
+                            l.features.len(),
+                            l.area(),
+                        ));
+                    }
                     if let Some(src) = e.source.as_ref() {
                         ui.label(egui::RichText::new(format!("Source: {}", src.file)).weak());
                     }

@@ -5,7 +5,7 @@ use crate::wall::Cut;
 use creabim_core::{Curve, ElementId, ElementKind, Model, OpeningKind};
 use glam::{DVec2, DVec3};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Pen {
     /// Material cut by the plan plane: heavy line, filled.
     Cut,
@@ -25,6 +25,30 @@ pub enum Pen {
     /// Another level traced under a plan: halftone, never printed, not
     /// picked, but snapped to.
     Underlay,
+    /// A linked site layer's own linework: the layer's colour, and its
+    /// line type as an index into [`LinePattern::NAMED`](creabim_core::styles::LinePattern::NAMED)
+    /// (a plain `u8` keeps `Pen` `Copy`). A view override still wins.
+    SiteLayer {
+        rgb: Option<[f32; 3]>,
+        pattern: Option<u8>,
+    },
+}
+
+/// A site layer's line type back from its `Pen` index.
+pub fn site_line_pattern(pattern: Option<u8>) -> creabim_core::styles::LinePattern {
+    use creabim_core::styles::LinePattern;
+    pattern
+        .and_then(|i| LinePattern::NAMED.get(i as usize).cloned())
+        .unwrap_or(LinePattern::Solid)
+}
+
+/// A line type as its `Pen` index; anything unnamed draws solid.
+pub fn site_pattern_index(pattern: &creabim_core::styles::LinePattern) -> u8 {
+    use creabim_core::styles::LinePattern;
+    LinePattern::NAMED
+        .iter()
+        .position(|n| n == pattern)
+        .unwrap_or(0) as u8
 }
 
 pub use creabim_core::Hatch;
@@ -1340,42 +1364,51 @@ pub fn plan_view_with(
             ElementKind::Sketch(sk) if sk.level == Some(level) => {
                 items.extend(sketch_items(e.id, sk, &|p| p));
             }
-            // loaded map layers draw on every plan: filled polygons in
-            // the category's hatch, outlines over them, polylines as
-            // light projection lines. V1 has no cut/range test — site
-            // geometry is flat at project zero. The layer's own style
-            // colours the fill and hides it project-wide.
-            ElementKind::SiteFeature(s) if s.style.visible => {
-                for f in &s.features {
-                    match &f.geom {
-                        creabim_core::SiteGeometry::Polygon { exterior, holes } => {
-                            items.push(PlanItem::Fill {
-                                id: e.id,
-                                points: exterior.clone(),
-                                hatch: s.category.hatch(),
-                                rgb: s.style.fill.map(|c| c.0),
-                            });
-                            items.push(PlanItem::Polygon {
-                                id: e.id,
-                                pen: Pen::Projection,
-                                points: exterior.clone(),
-                            });
-                            for h in holes {
+            // one homogenous element per linked file: every layer draws
+            // its filled polygons in its category's hatch (or its own
+            // colour under it), outlines over them, polylines in its own
+            // line type. V1 has no cut/range test — site geometry is
+            // flat at project zero. Hidden layers draw nowhere.
+            ElementKind::SiteFeature(s) => {
+                for l in s.layers() {
+                    if !l.style.visible {
+                        continue;
+                    }
+                    let pen = Pen::SiteLayer {
+                        rgb: l.style.line.map(|c| c.0),
+                        pattern: l.style.pattern.as_ref().map(site_pattern_index),
+                    };
+                    for f in &l.features {
+                        match &f.geom {
+                            creabim_core::SiteGeometry::Polygon { exterior, holes } => {
+                                items.push(PlanItem::Fill {
+                                    id: e.id,
+                                    points: exterior.clone(),
+                                    hatch: l.category.hatch(),
+                                    rgb: l.style.fill.map(|c| c.0),
+                                });
                                 items.push(PlanItem::Polygon {
                                     id: e.id,
-                                    pen: Pen::Projection,
-                                    points: h.clone(),
+                                    pen,
+                                    points: exterior.clone(),
                                 });
+                                for h in holes {
+                                    items.push(PlanItem::Polygon {
+                                        id: e.id,
+                                        pen,
+                                        points: h.clone(),
+                                    });
+                                }
                             }
-                        }
-                        creabim_core::SiteGeometry::Polyline { points } => {
-                            for w in points.windows(2) {
-                                items.push(PlanItem::Line {
-                                    id: e.id,
-                                    pen: Pen::Projection,
-                                    a: w[0],
-                                    b: w[1],
-                                });
+                            creabim_core::SiteGeometry::Polyline { points } => {
+                                for w in points.windows(2) {
+                                    items.push(PlanItem::Line {
+                                        id: e.id,
+                                        pen,
+                                        a: w[0],
+                                        b: w[1],
+                                    });
+                                }
                             }
                         }
                     }

@@ -507,8 +507,9 @@ pub enum ElementKind {
     /// The script registry: the project's link table between script
     /// blocks and disc modules. One per model; blocks name an entry.
     ScriptRegistry(crate::script::ScriptRegistry),
-    /// Loaded map geography: one source layer's polygons and polylines,
-    /// features keyed by source row-id. Drawn, never meshed.
+    /// Loaded map geography: one homogenous element per linked file,
+    /// its layers inside. One element per layer is the pre-file shape;
+    /// it still loads, and a reload merges it into the file element.
     SiteFeature(crate::site::SiteFeature),
 }
 
