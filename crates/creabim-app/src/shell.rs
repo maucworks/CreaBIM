@@ -780,9 +780,6 @@ impl CreaBimApp {
             Item::new("graphicstyles", "Graphic styles…")
                 .icon("align-left")
                 .hint("Style packs: pens by scale, object styles, hatch patterns and view templates. Load an office's pack to restyle every drawing."),
-            Item::new("site", "Site layers…")
-                .icon("link")
-                .hint("Linked GeoPackages: link a file, edit its layers (fill, line, line type, visible), and place the project by EPSG with a picked zero and north line"),
             Item::new("styles", "Annotation styles…")
                 .icon("anno-styles")
                 .hint("Named styles for dimensions, notes and tags: text, ends, tag shape, colour"),

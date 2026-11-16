@@ -77,11 +77,13 @@ impl CreaBimApp {
     /// for linked geography.
     fn apply_layer_style(&mut self, id: ElementId, layer: &str, style: LayerStyle) {
         let Some(e) = self.doc.model().get(id).cloned() else {
+            crate::app::diag(&format!("style: element {id:?} gone"));
             return;
         };
         let mut after = e.clone();
         if let ElementKind::SiteFeature(s) = &mut after.kind {
             let Some(l) = s.layers_mut().into_iter().find(|l| l.layer == layer) else {
+                crate::app::diag(&format!("style: layer {layer:?} not in element"));
                 return;
             };
             l.style = style;
@@ -94,6 +96,7 @@ impl CreaBimApp {
         let tx =
             creabim_core::Transaction::new(format!("site style {file}")).replace(e, after);
         let r = self.doc.commit(tx);
+        crate::app::diag(&format!("style: commit {layer:?} ok={}", r.is_ok()));
         self.report(r, "Layer style set: it draws so in every view.".to_string());
     }
 

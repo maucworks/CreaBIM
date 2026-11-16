@@ -183,6 +183,9 @@ impl CreaBimApp {
                 .key("Ctrl+,")
                 .icon("settings")
                 .hint("Your theme and the project's units"),
+            Item::new("site", "Site layers…")
+                .icon("link")
+                .hint("Linked GeoPackages: link a file, edit its layers (fill, line, line type, visible), and place the project by EPSG with a picked zero and north line"),
             Item::new("help:shortcuts", "Keyboard shortcuts")
                 .key("Ctrl+/")
                 .icon("keyboard"),
