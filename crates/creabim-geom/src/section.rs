@@ -873,8 +873,16 @@ pub fn apply_drawing_style(
         // only Colour and hatch keeps the materials' colours under hatches
         S::Technical => {
             for it in items.iter_mut() {
-                if let PlanItem::Fill { rgb, .. } = it {
-                    *rgb = None;
+                if let PlanItem::Fill { id, rgb, .. } = it {
+                    // a site layer's colour is the user's own choice in
+                    // the layer editor, not a material's: it stays, and
+                    // the layer's visible box is what hides it
+                    if !model
+                        .get(*id)
+                        .is_some_and(|e| matches!(e.kind, ElementKind::SiteFeature(_)))
+                    {
+                        *rgb = None;
+                    }
                 }
             }
         }

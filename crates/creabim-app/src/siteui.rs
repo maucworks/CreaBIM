@@ -850,4 +850,45 @@ mod tests {
             plan.items.len()
         );
     }
+
+    /// The same build the app shows: a plan view element, its drawing
+    /// via view_drawing_with. The fill colour must survive the drawing
+    /// path, not just the live plan's plan_view.
+    #[test]
+    fn drawing_path_keeps_the_layer_fill() {
+        use creabim_core::styles::Rgb;
+        use creabim_geom::section::view_drawing_with;
+        let (mut app, lid) = file_app();
+        // a plan view over the level, as the app creates them
+        let mut doc = std::mem::take(&mut app.doc);
+        let view = Element::new(
+            "L0 plan",
+            ElementKind::View(creabim_core::View::plan(lid)),
+        );
+        let vid = view.id;
+        doc.commit(creabim_core::Transaction::new("views").insert(view))
+            .unwrap();
+        app.doc = doc;
+        // the editor styles the layer exactly as its widgets do
+        let pkg = &site_packages(app.doc.model())[0];
+        let (id, name) = (pkg.id, pkg.layers[0].name.clone());
+        let mut style = pkg.layers[0].style.clone();
+        style.fill = Some(Rgb([0.2, 0.4, 0.6]));
+        app.apply_layer_style(id, &name, style);
+        let d = view_drawing_with(app.doc.model(), vid, false)
+            .expect("plan drawing builds");
+        let fills: Vec<_> = d
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                creabim_geom::plan::PlanItem::Fill { rgb, .. } => Some(*rgb),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            fills.iter().any(|f| f.is_some_and(|c| (c[0] - 0.2).abs() < 1e-6)),
+            "no fill colour in the built drawing, got {fills:?}"
+        );
+    }
 }
+
