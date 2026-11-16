@@ -439,229 +439,241 @@ impl CreaBimApp {
     /// per linked file, its layers editable.
     pub(super) fn site_window(&mut self, ctx: &egui::Context) {
         let mut open = self.site.open;
+        crate::app::shell::window("Site layers")
+            .open(&mut open)
+            .show(ctx, |ui| {
+                self.site_editor(ui);
+            });
+        if !open {
+            self.site.focus = None;
+        }
+        self.site.open = open;
+    }
+
+    /// The editor itself: the project location, one package section per
+    /// linked file, its layers editable. Shared by the Site layers
+    /// window and Settings › Site.
+    pub(super) fn site_editor(&mut self, ui: &mut egui::Ui) {
+
         let mut reload = None;
         let mut unlink = None;
         let mut shift: Option<(String, f64, f64)> = None;
         let mut turn: Option<(String, f64)> = None;
         let mut style_edits: Vec<(ElementId, String, LayerStyle)> = vec![];
         let mut pick: Option<SitePick> = None;
-        crate::app::shell::window("Site layers")
-            .open(&mut open)
-            .show(ctx, |ui| {
+        ui.label(
+            egui::RichText::new(
+                "A linked GeoPackage draws as one underlay. Layers move, turn and reload together — never one drag at a time. Links are created in File › Import and link….",
+            )
+            .weak(),
+        );
+        // The project's location: what every linked file and the
+        // model share — one origin, one north.
+        match self.doc.model().project_info().and_then(|(_, p)| p.placement()) {
+            Some(g) => {
+                ui.separator();
+                ui.heading("Location");
+                ui.label(format!(
+                    "{} · origin E {:.2}, N {:.2} · north turned {:.1}°",
+                    g.srid, g.easting, g.northing, g.rotation_deg
+                ));
+                crate::props::flow(ui, |ui| {
+                    if ui
+                        .button("Set zero: pick a point…")
+                        .on_hover_text("Click a point of the geography on a plan; it becomes the model origin (0,0), and every layer re-projects onto it.")
+                        .clicked()
+                    {
+                        pick = Some(SitePick::Zero);
+                    }
+                    ui.label("North line:");
+                    for c in Cardinal::ALL {
+                        let letter = match c {
+                            Cardinal::North => "N",
+                            Cardinal::East => "E",
+                            Cardinal::South => "S",
+                            Cardinal::West => "W",
+                        };
+                        if ui
+                            .small_button(letter)
+                            .on_hover_text(format!(
+                                "Pick a line of the geography; the project turns until it runs {}.",
+                                c.label().to_lowercase()
+                            ))
+                            .clicked()
+                        {
+                            pick = Some(SitePick::Line(c));
+                        }
+                    }
+                });
                 ui.label(
                     egui::RichText::new(
-                        "A linked GeoPackage draws as one underlay. Layers move, turn and reload together — never one drag at a time. Links are created in File › Import and link….",
+                        "Picks read the layers as last loaded; Reload first if you moved the location by hand.",
                     )
                     .weak(),
                 );
-                // The project's location: what every linked file and the
-                // model share — one origin, one north.
-                match self.doc.model().project_info().and_then(|(_, p)| p.placement()) {
-                    Some(g) => {
-                        ui.separator();
-                        ui.heading("Location");
-                        ui.label(format!(
-                            "{} · origin E {:.2}, N {:.2} · north turned {:.1}°",
-                            g.srid, g.easting, g.northing, g.rotation_deg
-                        ));
-                        ui.horizontal(|ui| {
-                            if ui
-                                .button("Set zero: pick a point…")
-                                .on_hover_text("Click a point of the geography on a plan; it becomes the model origin (0,0), and every layer re-projects onto it.")
-                                .clicked()
-                            {
-                                pick = Some(SitePick::Zero);
-                            }
-                            ui.label("North line:");
-                            for c in Cardinal::ALL {
-                                let letter = match c {
-                                    Cardinal::North => "N",
-                                    Cardinal::East => "E",
-                                    Cardinal::South => "S",
-                                    Cardinal::West => "W",
-                                };
-                                if ui
-                                    .small_button(letter)
-                                    .on_hover_text(format!(
-                                        "Pick a line of the geography; the project turns until it runs {}.",
-                                        c.label().to_lowercase()
-                                    ))
-                                    .clicked()
-                                {
-                                    pick = Some(SitePick::Line(c));
-                                }
-                            }
-                        });
-                        ui.label(
-                            egui::RichText::new(
-                                "Picks read the layers as last loaded; Reload first if you moved the location by hand.",
-                            )
-                            .weak(),
-                        );
-                    }
-                    None => {
-                        ui.label(
-                            egui::RichText::new(
-                                "The project has no location yet: linking a GeoPackage places it in the file's CRS.",
-                            )
-                            .weak(),
-                        );
-                    }
+            }
+            None => {
+                ui.label(
+                    egui::RichText::new(
+                        "The project has no location yet: linking a GeoPackage places it in the file's CRS.",
+                    )
+                    .weak(),
+                );
+            }
+        }
+        let mut packages = site_packages(self.doc.model());
+        for pkg in &mut packages {
+            ui.separator();
+            let focused = self.site.focus.as_deref() == Some(pkg.file.as_str());
+            ui.horizontal(|ui| {
+                if focused {
+                    ui.heading(
+                        egui::RichText::new(stem(&pkg.file))
+                            .color(crate::theme::interaction()),
+                    );
+                } else {
+                    ui.heading(stem(&pkg.file));
                 }
-                let mut packages = site_packages(self.doc.model());
-                for pkg in &mut packages {
-                    ui.separator();
-                    let focused = self.site.focus.as_deref() == Some(pkg.file.as_str());
-                    ui.horizontal(|ui| {
-                        if focused {
-                            ui.heading(
-                                egui::RichText::new(stem(&pkg.file))
-                                    .color(crate::theme::interaction()),
-                            );
-                        } else {
-                            ui.heading(stem(&pkg.file));
-                        }
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{} layers, {} features",
-                                pkg.layers.len(),
-                                pkg.layers.iter().map(|l| l.features).sum::<usize>()
-                            ))
-                            .weak(),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        if ui.small_button("Reload").clicked() {
-                            reload = Some(pkg.file.clone());
-                        }
-                        if ui.small_button("Unlink").clicked() {
-                            unlink = Some(pkg.file.clone());
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Move m:");
-                        ui.add(
-                            egui::DragValue::new(&mut self.site.shift[0])
-                                .speed(1.0)
-                                .prefix("dx "),
-                        );
-                        ui.add(
-                            egui::DragValue::new(&mut self.site.shift[1])
-                                .speed(1.0)
-                                .prefix("dy "),
-                        );
-                        if ui.small_button("Move package").clicked() {
-                            shift = Some((
-                                pkg.file.clone(),
-                                self.site.shift[0],
-                                self.site.shift[1],
-                            ));
-                        }
-                        ui.add(
-                            egui::DragValue::new(&mut self.site.turn)
-                                .speed(0.5)
-                                .suffix("°"),
-                        );
-                        if ui.small_button("Rotate").clicked() {
-                            turn = Some((pkg.file.clone(), self.site.turn));
-                        }
-                    });
-                    ui.label(format!("Eye toggles hide in {}.", self.site_target_name()));
-                    for l in &mut pkg.layers {
-                        ui.horizontal(|ui| {
-                            let target = self.site_target();
-                            let hidden = target.is_some_and(|t| {
-                                self.view_hidden(t).is_some_and(|h| {
-                                    h.elements.contains(&pkg.id)
-                                })
-                            });
-                            let mut eye = !hidden;
-                            if ui
-                                .checkbox(&mut eye, "")
-                                .on_hover_text("Hide the whole file in the active view (or the 3D window) only")
-                                .clicked()
-                            {
-                                if let Some(t) = target {
-                                    let id = pkg.id;
-                                    let name = stem(&pkg.file).to_string();
-                                    self.set_view_hidden(t, &format!("Site file {name}"), |h| {
-                                        h.set_element(id, !eye);
-                                    });
-                                }
-                            }
-                            if ui
-                                .checkbox(&mut l.style.visible, "")
-                                .on_hover_text("Show the layer in every view (the project's own visibility)")
-                                .changed()
-                            {
-                                style_edits.push((pkg.id, l.name.clone(), l.style.clone()));
-                            }
-                            ui.label(format!(
-                                "{} · {} · {} · {:.0} m²",
-                                l.name, l.category, l.features, l.area
-                            ));
-                        });
-                        let layer_name = l.name.clone();
-                        ui.horizontal(|ui| {
-                            ui.label("Fill");
-                            let mut fill = srgb(l.style.fill);
-                            if ui
-                                .color_edit_button_srgb(&mut fill)
-                                .on_hover_text("The colour under the category's hatch")
-                                .changed()
-                            {
-                                l.style.fill = rgb(fill);
-                                style_edits.push((pkg.id, layer_name.clone(), l.style.clone()));
-                            }
-                            ui.label("Line");
-                            let mut line = srgb(l.style.line);
-                            if ui
-                                .color_edit_button_srgb(&mut line)
-                                .on_hover_text("The outlines' and polylines' colour")
-                                .changed()
-                            {
-                                l.style.line = rgb(line);
-                                style_edits.push((pkg.id, layer_name.clone(), l.style.clone()));
-                            }
-                            ui.label("Line type");
-                            let mut pattern = l.style.pattern.clone();
-                            egui::ComboBox::from_id_salt(("site.line", (pkg.id, l.name.clone())))
-                                .selected_text(
-                                    pattern
-                                        .as_ref()
-                                        .map_or("Pen".to_string(), |p| p.label().to_string()),
-                                )
-                                .width(80.0)
-                                .show_ui(ui, |ui| {
-                                    if ui.selectable_label(pattern.is_none(), "Pen").clicked() {
-                                        pattern = None;
-                                    }
-                                    for p in LinePattern::NAMED {
-                                        if matches!(p, LinePattern::Custom(_)) {
-                                            continue;
-                                        }
-                                        if ui
-                                            .selectable_label(
-                                                pattern.as_ref() == Some(&p),
-                                                p.label(),
-                                            )
-                                            .clicked()
-                                        {
-                                            pattern = Some(p);
-                                        }
-                                    }
-                                });
-                            if pattern != l.style.pattern {
-                                l.style.pattern = pattern;
-                                style_edits.push((pkg.id, layer_name.clone(), l.style.clone()));
-                            }
-                        });
-                    }
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} layers, {} features",
+                        pkg.layers.len(),
+                        pkg.layers.iter().map(|l| l.features).sum::<usize>()
+                    ))
+                    .weak(),
+                );
+            });
+            ui.horizontal(|ui| {
+                if ui.small_button("Reload").clicked() {
+                    reload = Some(pkg.file.clone());
                 }
-                if packages.is_empty() {
-                    ui.label("No linked site layers. Link one in File › Import and link….");
+                if ui.small_button("Unlink").clicked() {
+                    unlink = Some(pkg.file.clone());
                 }
             });
+            crate::props::flow(ui, |ui| {
+                ui.label("Move m:");
+                ui.add(
+                    egui::DragValue::new(&mut self.site.shift[0])
+                        .speed(1.0)
+                        .prefix("dx "),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut self.site.shift[1])
+                        .speed(1.0)
+                        .prefix("dy "),
+                );
+                if ui.small_button("Move package").clicked() {
+                    shift = Some((
+                        pkg.file.clone(),
+                        self.site.shift[0],
+                        self.site.shift[1],
+                    ));
+                }
+                ui.add(
+                    egui::DragValue::new(&mut self.site.turn)
+                        .speed(0.5)
+                        .suffix("°"),
+                );
+                if ui.small_button("Rotate").clicked() {
+                    turn = Some((pkg.file.clone(), self.site.turn));
+                }
+            });
+            ui.label(format!("Eye toggles hide in {}.", self.site_target_name()));
+            for l in &mut pkg.layers {
+                ui.horizontal(|ui| {
+                    let target = self.site_target();
+                    let hidden = target.is_some_and(|t| {
+                        self.view_hidden(t).is_some_and(|h| {
+                            h.elements.contains(&pkg.id)
+                        })
+                    });
+                    let mut eye = !hidden;
+                    if ui
+                        .checkbox(&mut eye, "")
+                        .on_hover_text("Hide the whole file in the active view (or the 3D window) only")
+                        .clicked()
+                    {
+                        if let Some(t) = target {
+                            let id = pkg.id;
+                            let name = stem(&pkg.file).to_string();
+                            self.set_view_hidden(t, &format!("Site file {name}"), |h| {
+                                h.set_element(id, !eye);
+                            });
+                        }
+                    }
+                    if ui
+                        .checkbox(&mut l.style.visible, "")
+                        .on_hover_text("Show the layer in every view (the project's own visibility)")
+                        .changed()
+                    {
+                        style_edits.push((pkg.id, l.name.clone(), l.style.clone()));
+                    }
+                    ui.label(format!(
+                        "{} · {} · {} · {:.0} m²",
+                        l.name, l.category, l.features, l.area
+                    ));
+                });
+                let layer_name = l.name.clone();
+                crate::props::flow(ui, |ui| {
+                    ui.label("Fill");
+                    let mut fill = srgb(l.style.fill);
+                    if ui
+                        .color_edit_button_srgb(&mut fill)
+                        .on_hover_text("The colour under the category's hatch")
+                        .changed()
+                    {
+                        l.style.fill = rgb(fill);
+                        style_edits.push((pkg.id, layer_name.clone(), l.style.clone()));
+                    }
+                    ui.label("Line");
+                    let mut line = srgb(l.style.line);
+                    if ui
+                        .color_edit_button_srgb(&mut line)
+                        .on_hover_text("The outlines' and polylines' colour")
+                        .changed()
+                    {
+                        l.style.line = rgb(line);
+                        style_edits.push((pkg.id, layer_name.clone(), l.style.clone()));
+                    }
+                    ui.label("Line type");
+                    let mut pattern = l.style.pattern.clone();
+                    egui::ComboBox::from_id_salt(("site.line", (pkg.id, l.name.clone())))
+                        .selected_text(
+                            pattern
+                                .as_ref()
+                                .map_or("Pen".to_string(), |p| p.label().to_string()),
+                        )
+                        .width(80.0)
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(pattern.is_none(), "Pen").clicked() {
+                                pattern = None;
+                            }
+                            for p in LinePattern::NAMED {
+                                if matches!(p, LinePattern::Custom(_)) {
+                                    continue;
+                                }
+                                if ui
+                                    .selectable_label(
+                                        pattern.as_ref() == Some(&p),
+                                        p.label(),
+                                    )
+                                    .clicked()
+                                {
+                                    pattern = Some(p);
+                                }
+                            }
+                        });
+                    if pattern != l.style.pattern {
+                        l.style.pattern = pattern;
+                        style_edits.push((pkg.id, layer_name.clone(), l.style.clone()));
+                    }
+                });
+            }
+        }
+        if packages.is_empty() {
+            ui.label("No linked site layers. Link one in File › Import and link….");
+        }
         for (id, layer, style) in style_edits {
             self.apply_layer_style(id, &layer, style);
         }
@@ -691,10 +703,6 @@ impl CreaBimApp {
         if let Some((file, deg)) = turn {
             self.rotate_site_package(&file, deg);
         }
-        if !open {
-            self.site.focus = None;
-        }
-        self.site.open = open;
     }
 }
 
@@ -716,4 +724,106 @@ fn stem(path: &str) -> &str {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use creabim_core::{
+        Document, Element, ElementId, ElementKind, Level, Model, SiteCategory, SiteFeature,
+        SiteLayer, SiteRow,
+    };
+    use glam::DVec2;
+
+    /// The app around one linked file with one water layer, as the
+    /// editor sees it: level, file element, source.
+    fn file_app() -> (CreaBimApp, ElementId) {
+        let mut app = CreaBimApp::blank(None);
+        let l = Element::new(
+            "L0",
+            ElementKind::Level(Level {
+                elevation: 0.0,
+                height: 3.0,
+            }),
+        );
+        let lid = l.id;
+        let mut doc = Document::from_model(Model::new());
+        doc.commit(creabim_core::Transaction::new("level").insert(l))
+            .unwrap();
+        let mut el = Element::new(
+            "Site demo",
+            ElementKind::SiteFeature(SiteFeature::file(vec![SiteLayer {
+                layer: "bgt_waterdeel".into(),
+                category: SiteCategory::Water,
+                features: vec![SiteRow {
+                    key: "1".into(),
+                    geom: SiteGeometry::Polygon {
+                        exterior: vec![
+                            DVec2::new(0.0, 0.0),
+                            DVec2::new(4.0, 0.0),
+                            DVec2::new(4.0, 3.0),
+                            DVec2::new(0.0, 3.0),
+                        ],
+                        holes: vec![],
+                    },
+                }],
+                style: LayerStyle::default(),
+            }])),
+        );
+        el.source = Some(creabim_core::Source {
+            file: "demo.gpkg".into(),
+            object: "demo".into(),
+            stamp: 1,
+        });
+        doc.commit(creabim_core::Transaction::new("link").insert(el))
+            .unwrap();
+        app.doc = doc;
+        (app, lid)
+    }
+
+    #[test]
+    fn editor_style_and_visibility_reach_the_plan() {
+        use creabim_core::styles::Rgb;
+        use creabim_geom::plan::{plan_view, Pen, PlanItem};
+        let (mut app, lid) = file_app();
+        // what the editor lists
+        let pkgs = site_packages(app.doc.model());
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].layers.len(), 1);
+        let (id, name) = (pkgs[0].id, pkgs[0].layers[0].name.clone());
+        // the editor styles the layer exactly as its widgets do
+        let mut style = pkgs[0].layers[0].style.clone();
+        style.fill = Some(Rgb([0.2, 0.4, 0.6]));
+        app.apply_layer_style(id, &name, style);
+        let plan = plan_view(app.doc.model(), lid, 1.2);
+        let fills: Vec<_> = plan
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                PlanItem::Fill { rgb, .. } => Some(*rgb),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fills.len(), 1);
+        assert!(fills[0].is_some_and(|c| (c[0] - 0.2).abs() < 1e-6));
+        assert!(plan.items.iter().any(|it| matches!(
+            it,
+            PlanItem::Polygon {
+                pen: Pen::SiteLayer { .. },
+                ..
+            }
+        )));
+        // and hiding the layer draws nothing
+        let mut style = site_packages(app.doc.model())[0].layers[0]
+            .style
+            .clone();
+        style.visible = false;
+        app.apply_layer_style(id, &name, style);
+        let plan = plan_view(app.doc.model(), lid, 1.2);
+        assert!(
+            plan.items.is_empty(),
+            "hidden layer draws nothing, has {:?}",
+            plan.items.len()
+        );
+    }
 }

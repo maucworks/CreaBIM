@@ -334,12 +334,13 @@ impl CreaBimApp {
         // window as settings are added
         let tab_id = egui::Id::new("settings.tab");
         let mut tab: usize = ctx.data(|d| d.get_temp(tab_id)).unwrap_or(0);
-        const TABS: [(&str, &str); 6] = [
+        const TABS: [(&str, &str); 7] = [
             ("Interface", "layout-panel-left"),
             ("Viewport", "box"),
             ("Navigation", "hand"),
             ("Snapping", "magnet"),
             ("Project", "folder"),
+            ("Site", "link"),
             ("Keymap", "keyboard"),
         ];
         let height = (area.height() - 80.0).clamp(300.0, 560.0);
@@ -592,6 +593,10 @@ impl CreaBimApp {
                                                 .weak()
                                                 .small(),
                                         );
+                                    }
+                                    5 => {
+                                        crate::props::section(ui, "Linked geography");
+                                        self.site_editor(ui);
                                     }
                                     _ => {
                                         crate::props::section(ui, "Shortcuts");
