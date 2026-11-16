@@ -436,12 +436,6 @@ impl CreaBimApp {
     /// The editor: the project location, one package section per
     /// linked file, its layers editable. Lives in Settings › Site.
     pub(super) fn site_editor(&mut self, ui: &mut egui::Ui) {
-
-        let mut reload = None;
-        let mut unlink = None;
-        let mut shift: Option<(String, f64, f64)> = None;
-        let mut turn: Option<(String, f64)> = None;
-        let mut style_edits: Vec<(ElementId, String, LayerStyle)> = vec![];
         let mut pick: Option<SitePick> = None;
         ui.label(
             egui::RichText::new(
@@ -504,7 +498,59 @@ impl CreaBimApp {
             }
         }
         let mut packages = site_packages(self.doc.model());
+        let mut edits = SiteEdits::default();
         for pkg in &mut packages {
+            self.site_package_section(ui, pkg, &mut edits);
+        }
+        if packages.is_empty() {
+            ui.label("No linked site layers. Link one in File › Import and link….");
+        }
+        self.apply_site_edits(edits);
+        if let Some(p) = pick {
+            self.plan.site_pick = Some(p);
+            self.plan.align_ref = None;
+            self.plan.calibrate = None;
+            self.status = match p {
+                SitePick::Zero => {
+                    "Set zero: click a point of the geography on the plan.".into()
+                }
+                SitePick::Line(c) => format!(
+                    "Point the line: click a line of the geography, it is to run {}.",
+                    c.label().to_lowercase()
+                ),
+            };
+        }
+    }
+
+    /// Apply what package sections gathered while their widgets ran.
+    fn apply_site_edits(&mut self, edits: SiteEdits) {
+        for (id, layer, style) in edits.style_edits {
+            self.apply_layer_style(id, &layer, style);
+        }
+        if let Some(file) = edits.reload {
+            self.reload_site_package(&file);
+        }
+        if let Some(file) = edits.unlink {
+            self.unlink_site_package(&file);
+        }
+        if let Some((file, dx, dy)) = edits.shift {
+            self.move_site_package(&file, dx, dy);
+        }
+        if let Some((file, deg)) = edits.turn {
+            self.rotate_site_package(&file, deg);
+        }
+    }
+
+    /// One linked file's section: its heading, reload/unlink, move
+    /// and turn, and its layers' eye, visibility, colours and line
+    /// type. Its wishes gather into `edits`; the caller applies them.
+    /// Shared by Settings › Site and the selected file's Properties.
+    fn site_package_section(
+        &mut self,
+        ui: &mut egui::Ui,
+        pkg: &mut SitePackage,
+        edits: &mut SiteEdits,
+    ) {
             ui.separator();
             let focused = self.site.focus.as_deref() == Some(pkg.file.as_str());
             ui.horizontal(|ui| {
@@ -527,10 +573,10 @@ impl CreaBimApp {
             });
             ui.horizontal(|ui| {
                 if ui.small_button("Reload").clicked() {
-                    reload = Some(pkg.file.clone());
+                    edits.reload = Some(pkg.file.clone());
                 }
                 if ui.small_button("Unlink").clicked() {
-                    unlink = Some(pkg.file.clone());
+                    edits.unlink = Some(pkg.file.clone());
                 }
             });
             crate::props::flow(ui, |ui| {
@@ -546,7 +592,7 @@ impl CreaBimApp {
                         .prefix("dy "),
                 );
                 if ui.small_button("Move package").clicked() {
-                    shift = Some((
+                    edits.shift = Some((
                         pkg.file.clone(),
                         self.site.shift[0],
                         self.site.shift[1],
@@ -558,7 +604,7 @@ impl CreaBimApp {
                         .suffix("°"),
                 );
                 if ui.small_button("Rotate").clicked() {
-                    turn = Some((pkg.file.clone(), self.site.turn));
+                    edits.turn = Some((pkg.file.clone(), self.site.turn));
                 }
             });
             ui.label(format!("Eye toggles hide in {}.", self.site_target_name()));
@@ -589,7 +635,7 @@ impl CreaBimApp {
                         .on_hover_text("Show the layer in every view (the project's own visibility)")
                         .changed()
                     {
-                        style_edits.push((pkg.id, l.name.clone(), l.style.clone()));
+                        edits.style_edits.push((pkg.id, l.name.clone(), l.style.clone()));
                     }
                     ui.label(format!(
                         "{} · {} · {} · {:.0} m²",
@@ -606,7 +652,7 @@ impl CreaBimApp {
                         .changed()
                     {
                         l.style.fill = rgb(fill);
-                        style_edits.push((pkg.id, layer_name.clone(), l.style.clone()));
+                        edits.style_edits.push((pkg.id, layer_name.clone(), l.style.clone()));
                     }
                     ui.label("Line");
                     let mut line = srgb(l.style.line);
@@ -616,7 +662,7 @@ impl CreaBimApp {
                         .changed()
                     {
                         l.style.line = rgb(line);
-                        style_edits.push((pkg.id, layer_name.clone(), l.style.clone()));
+                        edits.style_edits.push((pkg.id, layer_name.clone(), l.style.clone()));
                     }
                     ui.label("Line type");
                     let mut pattern = l.style.pattern.clone();
@@ -648,44 +694,37 @@ impl CreaBimApp {
                         });
                     if pattern != l.style.pattern {
                         l.style.pattern = pattern;
-                        style_edits.push((pkg.id, layer_name.clone(), l.style.clone()));
+                        edits.style_edits.push((pkg.id, layer_name.clone(), l.style.clone()));
                     }
                 });
             }
-        }
-        if packages.is_empty() {
-            ui.label("No linked site layers. Link one in File › Import and link….");
-        }
-        for (id, layer, style) in style_edits {
-            self.apply_layer_style(id, &layer, style);
-        }
-        if let Some(p) = pick {
-            self.plan.site_pick = Some(p);
-            self.plan.align_ref = None;
-            self.plan.calibrate = None;
-            self.status = match p {
-                SitePick::Zero => {
-                    "Set zero: click a point of the geography on the plan.".into()
-                }
-                SitePick::Line(c) => format!(
-                    "Point the line: click a line of the geography, it is to run {}.",
-                    c.label().to_lowercase()
-                ),
-            };
-        }
-        if let Some(file) = reload {
-            self.reload_site_package(&file);
-        }
-        if let Some(file) = unlink {
-            self.unlink_site_package(&file);
-        }
-        if let Some((file, dx, dy)) = shift {
-            self.move_site_package(&file, dx, dy);
-        }
-        if let Some((file, deg)) = turn {
-            self.rotate_site_package(&file, deg);
-        }
     }
+
+    /// The selected linked file's editor, drawn inside Properties so
+    /// its layers are edited where the element is. Same section as
+    /// Settings › Site shows.
+    pub(super) fn site_element_section(&mut self, ui: &mut egui::Ui, id: ElementId) {
+        let Some(mut pkg) = site_packages(self.doc.model())
+            .into_iter()
+            .find(|p| p.id == id)
+        else {
+            return;
+        };
+        let mut edits = SiteEdits::default();
+        self.site_package_section(ui, &mut pkg, &mut edits);
+        self.apply_site_edits(edits);
+    }
+}
+
+/// Edits gathered while a package's widgets ran (egui borrows while it
+/// draws): the caller applies them once drawing is done.
+#[derive(Default)]
+struct SiteEdits {
+    reload: Option<String>,
+    unlink: Option<String>,
+    shift: Option<(String, f64, f64)>,
+    turn: Option<(String, f64)>,
+    style_edits: Vec<(ElementId, String, LayerStyle)>,
 }
 
 /// sRGB 0..1 to the picker's bytes; none reads white.

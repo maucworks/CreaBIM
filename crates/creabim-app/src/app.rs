@@ -9791,32 +9791,14 @@ impl CreaBimApp {
                         label = "Remove registry entry";
                     }
                 }
-                ElementKind::SiteFeature(s) => {
-                    // Loaded geography: read-only here, refreshed from
-                    // its GeoPackage; per-layer colours and visibility
-                    // live in the Site layers editor, so a reload never
-                    // fights them.
-                    ui.label(format!("Layers: {}", s.layers().len()));
-                    for l in s.layers() {
-                        ui.label(format!(
-                            "{} · {:?} · {} · {:.0} m²",
-                            l.layer,
-                            l.category,
-                            l.features.len(),
-                            l.area(),
-                        ));
-                    }
+                ElementKind::SiteFeature(_) => {
+                    // Linked geography: refreshed from its GeoPackage,
+                    // but the layers are edited right here — the same
+                    // section Settings › Site shows, for this file.
                     if let Some(src) = e.source.as_ref() {
                         ui.label(egui::RichText::new(format!("Source: {}", src.file)).weak());
-                        let file = src.file.clone();
-                        if ui
-                            .button("Site layers…")
-                            .on_hover_text("Edit this file's layers in Settings › Site: fill, line, line type, visibility")
-                            .clicked()
-                        {
-                            self.open_site_settings(Some(file));
-                        }
                     }
+                    self.site_element_section(ui, id);
                 }
                 ElementKind::Reference(r) => {
                     if let Some(l) = self.reference_fields(ui, id, r) {

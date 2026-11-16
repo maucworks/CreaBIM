@@ -52,7 +52,7 @@ Terrain and hard landscape areas have the same grips as a slab: drag a corner or
 *File › Import and link…* reads a GeoPackage of map geography (for example BGT or BAG) as one underlay. One homogenous element per linked file holds every layer; each draws its outlines on every plan, in its category's hatch. GeoPackage files stay in their own CRS: the layers are projected into model metres on load.
 
 - **Linking**: pick a `.gpkg` in *File › Import and link…*. The first link places the project in the file's CRS, with the model origin at the extent's middle. Files in another CRS are refused — reproject them first, never on load.
-- **Editing**: select the linked file in the project browser — its *Properties* offer *Site layers…*, which opens *Settings › Site*, where the per-layer editor lives (the *CreaBIM* menu's *Site layers…* goes to the same place).
+- **Editing**: select the linked file in the project browser — its *Properties* hold the editor right there: per layer the *visible* box, **Fill**, **Line** and **Line type**, plus the file's eye, reload, unlink, move and turn. *Settings › Site* (the *CreaBIM* menu's *Site layers…*) shows the same editor for every linked file, with the project's location and the zero/north picks.
 - **Location**: shows the project's CRS, its origin eastings/northings, and how far model-up is turned from grid north.
 - **Set zero**: click a point of the geography on a plan; it becomes the model origin (0,0), and every layer re-projects onto it at once.
 - **North line N/E/S/W**: pick a line of the geography; the project turns until it runs north, east, south or west, and every layer re-projects with it. So site and GIS stay synched around one reference point and one rotation.
