@@ -795,7 +795,7 @@ impl CreaBimApp {
             Item::Header("Linked files".into()),
             Item::new("link", "Import and link…")
                 .icon("link")
-                .hint("Bring in the objects of a .blend or .FCStd file. Saving it in Blender or FreeCAD updates them here."),
+                .hint("Bring in the objects of a .blend, .FCStd or .glb file. Saving it in Blender or FreeCAD updates them here; a .glb keeps each node as a mesh with its IFC class."),
             Item::new("live", "Reload linked files when saved").checked(self.live_reload),
         ]);
         if self.import_report.is_some() {

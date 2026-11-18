@@ -8,7 +8,7 @@ use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 /// The kinds of file that come in as linked objects.
-pub const LINKABLE: &[&str] = &["blend", "fcstd"];
+pub const LINKABLE: &[&str] = &["blend", "fcstd", "glb", "gltf"];
 
 fn ext(path: &str) -> String {
     Path::new(path)
@@ -32,6 +32,12 @@ pub fn read_incoming(path: &str) -> Result<Vec<Incoming>, String> {
     match ext(path).as_str() {
         "blend" => creabim_exchange::blend::read_file(Path::new(path)).map_err(|e| e.to_string()),
         "fcstd" => creabim_exchange::freecad::read_file(Path::new(path)).map_err(|e| e.to_string()),
+        // glTF meshes come in as linked objects too: every node-mesh is
+        // one incoming object, with an IFC class hint from
+        // node.extras.ifc_class when the exporter wrote one.
+        "glb" | "gltf" => creabim_exchange::gltf_read::read_file(Path::new(path))
+            .map(|(incoming, _materials)| incoming)
+            .map_err(|e| e.to_string()),
         other => Err(format!("CreaBIM can't read .{other} files yet.")),
     }
 }
