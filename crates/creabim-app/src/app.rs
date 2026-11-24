@@ -565,9 +565,11 @@ impl CreaBimApp {
                     let report = importui::ImportReport::new(&file_label(path), &imported);
                     for w in &imported.warnings {
                         eprintln!("IFC import: {w}");
+                        crate::actlog::line(format!("IFC import: {w}"));
                     }
                     for d in &imported.details {
                         eprintln!("IFC import:   {d}");
+                        crate::actlog::line(format!("IFC import:   {d}"));
                     }
                     self.import_report = Some(report);
                     self.load_model(imported.model);
