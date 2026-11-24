@@ -1,5 +1,10 @@
 //! CreaBIM desktop app.
 
+// A released app opens its window alone, with no terminal beside it
+// (users took the console for a bug). Debug builds keep the console for
+// what they print while being worked on.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod actlog;
 mod align3d;
 mod aligntool;

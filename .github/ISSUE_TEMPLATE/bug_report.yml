@@ -35,8 +35,8 @@ body:
     id: version
     attributes:
       label: CreaBIM version
-      description: In Help › About CreaBIM, for example "1.1.1".
-      placeholder: "1.1.1"
+      description: In Help › About CreaBIM, for example "1.1.2".
+      placeholder: "1.1.2"
     validations:
       required: true
 

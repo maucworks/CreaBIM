@@ -695,8 +695,8 @@ impl Snapper {
             }
         }
         for g in (0..n).filter(|i| guide(&self.segments[*i])) {
-            for (j, seg) in self.segments.iter().enumerate().take(n) {
-                if j != g && (!guide(seg) || j > g) {
+            for (j, t) in self.segments.iter().enumerate().take(n) {
+                if j != g && (!guide(t) || j > g) {
                     pairs.push((g.min(j), g.max(j)));
                 }
             }
@@ -1511,9 +1511,25 @@ pub fn feature_edges(mesh: &creabim_geom::mesh::TriMesh) -> Vec<(DVec3, DVec3)> 
     let normals: Vec<DVec3> = tris.iter().map(|t| tri_normal(&pts, t)).collect();
     let mut out: Vec<(DVec3, DVec3)> = edge_map(&tris)
         .into_iter()
-        .filter(|(_, ts)| {
+        .filter(|((a, b), ts)| {
             let n0 = normals[ts[0]];
-            ts.len() == 1 || ts.iter().any(|t| normals[*t].dot(n0) < 0.94)
+            let crease = ts.iter().any(|t| normals[*t].dot(n0) < 0.94);
+            if !crease || ts.len() < 4 || !ts.iter().all(|t| normals[*t].dot(n0).abs() > 1.0 - 1e-9)
+            {
+                return ts.len() == 1 || crease;
+            }
+
+            // Touching layers can each contribute two triangles to the same diagonal.
+            // A coplanar overlap on only one side is still a rim.
+            let origin = pts[*a as usize];
+            let across = n0.cross(pts[*b as usize] - origin);
+            let side = |t: usize| {
+                tris[t]
+                    .iter()
+                    .map(|&v| across.dot(pts[v as usize] - origin))
+                    .sum::<f64>()
+            };
+            !(ts.iter().any(|&t| side(t) > 0.0) && ts.iter().any(|&t| side(t) < 0.0))
         })
         .map(|((a, b), _)| (pts[a as usize], pts[b as usize]))
         .collect();
@@ -2660,6 +2676,24 @@ mod tests {
         assert!(s
             .snap(&no_grids, at(0.04, -3.0), &flat, None, None)
             .is_none());
+    }
+
+    #[test]
+    fn coincident_layer_faces_keep_their_outline_without_a_diagonal() {
+        let mesh = creabim_geom::mesh::TriMesh {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            // The same square faces in opposite directions at a layer interface.
+            indices: vec![0, 1, 2, 0, 2, 3, 0, 2, 1, 0, 3, 2],
+            ..Default::default()
+        };
+        let edges = feature_edges(&mesh);
+        assert_eq!(edges.len(), 4);
+        assert!(edges.iter().all(|(a, b)| a.distance(*b) == 1.0));
     }
 
     #[test]

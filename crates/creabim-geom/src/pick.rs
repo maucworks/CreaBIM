@@ -9,7 +9,11 @@ pub struct Hit {
     pub id: ElementId,
     /// Distance along the ray.
     pub t: f32,
-    /// Index of the hit triangle within the element's mesh.
+    /// Which item of the scene was hit. An element can have several items
+    /// (a terrain's surface and its skirt, a wall's layers), so the id
+    /// alone does not say whose mesh `triangle` counts in.
+    pub item: usize,
+    /// Index of the hit triangle within that item's mesh.
     pub triangle: usize,
 }
 
@@ -26,7 +30,7 @@ pub fn pick_where(
     keep: &dyn Fn(ElementId) -> bool,
 ) -> Option<Hit> {
     let mut best: Option<Hit> = None;
-    for item in scene.iter().filter(|i| keep(i.id)) {
+    for (at, item) in scene.iter().enumerate().filter(|(_, i)| keep(i.id)) {
         let p = &item.mesh.positions;
         for (tri, idx) in item.mesh.indices.chunks(3).enumerate() {
             let (a, b, c) = (
@@ -39,6 +43,7 @@ pub fn pick_where(
                     best = Some(Hit {
                         id: item.id,
                         t,
+                        item: at,
                         triangle: tri,
                     });
                 }
@@ -52,7 +57,7 @@ pub fn pick_where(
 /// nearest hit: what is behind or inside the closest one, to cycle to.
 pub fn pick_all(scene: &[SceneItem], origin: Vec3, dir: Vec3) -> Vec<Hit> {
     let mut best: Vec<Hit> = Vec::new();
-    for item in scene {
+    for (at, item) in scene.iter().enumerate() {
         let p = &item.mesh.positions;
         for (tri, idx) in item.mesh.indices.chunks(3).enumerate() {
             let (a, b, c) = (
@@ -66,6 +71,7 @@ pub fn pick_all(scene: &[SceneItem], origin: Vec3, dir: Vec3) -> Vec<Hit> {
             let hit = Hit {
                 id: item.id,
                 t,
+                item: at,
                 triangle: tri,
             };
             match best.iter_mut().find(|h| h.id == item.id) {
@@ -134,17 +140,10 @@ fn pick_face_where(
     keep: &dyn Fn(ElementId) -> bool,
 ) -> Option<FaceHit> {
     let hit = pick_where(scene, origin, dir, keep)?;
-    // the item the hit came from: the closest of the element's items there
-    let item = scene
-        .iter()
-        .filter(|i| i.id == hit.id && hit.triangle < i.mesh.triangle_count())
-        .find(|i| {
-            let p = &i.mesh.positions;
-            let idx = &i.mesh.indices[hit.triangle * 3..hit.triangle * 3 + 3];
-            let v = |k: usize| Vec3::from(p[idx[k] as usize]);
-            ray_triangle(origin, dir, v(0), v(1), v(2)).is_some_and(|t| (t - hit.t).abs() < 1e-5)
-        })?;
-    let m = &item.mesh;
+    let m = &scene.get(hit.item)?.mesh;
+    if hit.triangle >= m.triangle_count() {
+        return None;
+    }
     let tri = |t: usize| -> [glam::DVec3; 3] {
         let i = &m.indices[t * 3..t * 3 + 3];
         [0, 1, 2].map(|k| Vec3::from(m.positions[i[k] as usize]).as_dvec3())
@@ -248,6 +247,44 @@ mod tests {
             pick_face(&scene, o, -Vec3::Z).map(|f| f.hit.id),
             Some(all[0].id)
         );
+    }
+
+    /// An element drawn as two items: a small one first, then a larger one
+    /// that the ray hits at a triangle the first does not have.
+    fn two_items_of_one_element() -> (Vec<SceneItem>, ElementId) {
+        let model = sample_house();
+        let scene = crate::build_scene(&model);
+        let slab = scene
+            .iter()
+            .find(|i| model.get(i.id).is_some_and(|e| e.name == "FF Slab"))
+            .unwrap();
+        let mut small = slab.clone();
+        small.mesh.indices.truncate(3);
+        // moved far off, so the ray can only hit the whole one
+        for p in &mut small.mesh.positions {
+            p[0] += 500.0;
+        }
+        (vec![small, slab.clone()], slab.id)
+    }
+
+    #[test]
+    fn a_hit_names_the_item_it_landed_on_when_an_element_has_several() {
+        let (scene, id) = two_items_of_one_element();
+        let o = Vec3::new(5.0, 3.0, 50.0);
+        let hit = pick(&scene, o, -Vec3::Z).unwrap();
+        assert_eq!((hit.id, hit.item), (id, 1));
+        // the triangle counts in that item's mesh, not in the first of the id
+        assert!(hit.triangle < scene[hit.item].mesh.triangle_count());
+        assert!(
+            hit.triangle >= scene[0].mesh.triangle_count(),
+            "the test must hit a triangle the first item lacks"
+        );
+        let all = pick_all(&scene, o, -Vec3::Z);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].item, 1);
+        let face = pick_face(&scene, o, -Vec3::Z).unwrap();
+        assert_eq!(face.hit.item, 1);
+        assert!(face.normal.z > 0.9);
     }
 
     #[test]
