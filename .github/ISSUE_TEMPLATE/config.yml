@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Questions and how-to
+    url: https://github.com/chopinregis/CreaBIM/discussions
+    about: Ask how to do something, or share what you made, in Discussions.
+  - name: The guide
+    url: https://chopinregis.github.io/CreaBIM/
+    about: The download, the films and the guide.

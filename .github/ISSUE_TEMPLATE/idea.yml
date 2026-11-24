@@ -1,0 +1,34 @@
+name: An idea or a wish
+description: Something you'd like CreaBIM to do, or to do differently.
+title: "[Idea] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you! Ideas from people who use CreaBIM shape what comes next.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What would you like to do?
+      description: Describe the task in your own work, not only the feature. Why you need it helps most.
+      placeholder: "I want to draw quick 2D lines and arcs in a plan, to sketch the site around the building."
+    validations:
+      required: true
+
+  - type: textarea
+    id: today
+    attributes:
+      label: How do you do it today?
+      description: In CreaBIM, or in another program you know.
+    validations:
+      required: false
+
+  - type: textarea
+    id: pictures
+    attributes:
+      label: Pictures or examples
+      description: A sketch, a screenshot or a link that shows what you mean. Drag files here.
+    validations:
+      required: false

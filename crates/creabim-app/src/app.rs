@@ -151,8 +151,15 @@ pub struct CreaBimApp {
     report_ask: Option<bool>,
     /// Closing with unsaved changes: Save, Don't save or Cancel is asked.
     close_ask: bool,
+    /// Where the Save the changes window is: asking, saving, saved, failed.
+    close_state: appmenu::CloseState,
     /// The close was settled (saved, or the changes let go): let it through.
     close_ok: bool,
+    /// The pointer left the drawing area (onto a web pane, or out of the
+    /// window) and hasn't come back yet.
+    pointer_away: bool,
+    /// When the pointer last moved over the drawing area, in seconds.
+    pub(crate) pointer_seen: f64,
     /// What the area in front showed last frame: a Masters or Profile view
     /// coming forward brings its own Properties tab (MU40).
     prop_front: Option<crate::areas::Shows>,
@@ -236,6 +243,9 @@ pub struct CreaBimApp {
     /// The model's revision when it was last opened or saved: anything
     /// else is unsaved (A7-8).
     saved_revision: Option<u64>,
+    /// The undo history when it was last opened or saved: how many steps
+    /// and the last one's id, to count the changes since (Save the changes).
+    saved_mark: (usize, Option<creabim_core::document::StepId>),
     /// The window title last set, so it is only sent when it changes.
     title: String,
     /// The status and tool last written to the activity log.
@@ -324,6 +334,10 @@ pub struct CreaBimApp {
     new_project_classic: bool,
 }
 
+/// A pointer moving over the drawing area this recently (seconds) can't be
+/// over a bar: a tooltip a bar asks for then is a stale one.
+pub(crate) const TIP_PAUSE: f64 = 0.3;
+
 /// How much of the accent a selected element takes in 3D (A7-2).
 const SELECTION_TINT: f32 = 0.35;
 
@@ -399,7 +413,10 @@ impl CreaBimApp {
             log_ui: Default::default(),
             report_ask: None,
             close_ask: false,
+            close_state: Default::default(),
             close_ok: false,
+            pointer_away: true,
+            pointer_seen: 0.0,
             prop_front: None,
             camera: OrbitCamera::default(),
             cube: Default::default(),
@@ -442,6 +459,7 @@ impl CreaBimApp {
             extrude_distance: 1.0,
             path: "project.creabim".into(),
             saved_revision: None,
+            saved_mark: (0, None),
             title: String::new(),
             logged: (String::new(), None),
             watch: Default::default(),
@@ -532,9 +550,11 @@ impl CreaBimApp {
                     let report = importui::ImportReport::new(&file_label(path), &imported);
                     for w in &imported.warnings {
                         eprintln!("IFC import: {w}");
+                        crate::actlog::line(format!("IFC import: {w}"));
                     }
                     for d in &imported.details {
                         eprintln!("IFC import:   {d}");
+                        crate::actlog::line(format!("IFC import:   {d}"));
                     }
                     self.import_report = Some(report);
                     self.load_model(imported.model);
@@ -572,7 +592,7 @@ impl CreaBimApp {
                 self.watch = Default::default();
                 self.recent.add(path);
                 self.path = path.to_string();
-                self.saved_revision = Some(self.doc.model().revision());
+                self.mark_saved();
                 self.status = format!("Opened {path}");
                 // copies a Duplicate left on their originals (MU24)
                 let stacked = creabim_core::checks::stacked_copies(self.doc.model()).len();
@@ -592,25 +612,53 @@ impl CreaBimApp {
         self.saved_revision != Some(self.doc.model().revision())
     }
 
+    /// The model as it is now counts as saved.
+    fn mark_saved(&mut self) {
+        self.saved_revision = Some(self.doc.model().revision());
+        let steps = self.doc.undo_steps();
+        self.saved_mark = (steps.len(), steps.last().map(|s| s.id));
+    }
+
+    /// How many undo steps were made since it was last opened or saved
+    /// (at least one while it is unsaved).
+    pub(crate) fn changes_since_saved(&self) -> usize {
+        let steps = self.doc.undo_steps();
+        let (len, last) = self.saved_mark;
+        let n = match last {
+            // the step saved last is still in the history: what follows it
+            Some(id) => match steps.iter().rposition(|s| s.id == id) {
+                Some(at) => steps.len() - at - 1,
+                None => steps.len().abs_diff(len),
+            },
+            None => steps.len().abs_diff(len),
+        };
+        if self.unsaved() {
+            n.max(1)
+        } else {
+            n
+        }
+    }
+
     fn save(&mut self) {
+        let r = self.save_file();
+        self.report(r, format!("Saved {}", self.path));
+    }
+
+    /// Write the project to its file, saying why when it can't.
+    pub(crate) fn save_file(&mut self) -> Result<(), String> {
         if self.path.to_ascii_lowercase().ends_with(".json") {
-            let r = std::fs::write(&self.path, self.doc.model().to_json());
-            if r.is_ok() {
-                self.saved_revision = Some(self.doc.model().revision());
-            }
-            self.report(r, format!("Saved {}", self.path));
-            return;
+            std::fs::write(&self.path, self.doc.model().to_json()).map_err(|e| e.to_string())?;
+            self.mark_saved();
+            return Ok(());
         }
         if !self.path.to_ascii_lowercase().ends_with(".creabim") {
             self.path = with_extension(&self.path, "creabim");
         }
-        let r = creabim_store::save(&self.path, &self.doc);
-        if r.is_ok() {
-            let path = self.path.clone();
-            self.recent.add(&path);
-            self.saved_revision = Some(self.doc.model().revision());
-        }
-        self.report(r, format!("Saved {}", self.path));
+        creabim_store::save(&self.path, &self.doc).map_err(|e| e.to_string())?;
+        let path = self.path.clone();
+        self.recent.add(&path);
+        self.mark_saved();
+        Ok(())
     }
 
     fn open_dialog(&mut self) {
@@ -1482,6 +1530,19 @@ impl CreaBimApp {
         // on what is picked on the master (MU40)
         if self.masters_command(c) {
             return;
+        }
+        if c == Command::Duplicate {
+            let ids = self.selection.all();
+            if let Some(r) = crate::modal::duplicate_views(&mut self.doc, &ids) {
+                match r {
+                    Ok(copies) => {
+                        self.status = crate::modal::views_duplicated(&self.doc, &copies);
+                        self.selection.extend(copies, false);
+                    }
+                    Err(e) => self.status = e,
+                }
+                return;
+            }
         }
         if let Some(m) = c.modal() {
             self.arm(c, m);
@@ -5704,11 +5765,7 @@ impl CreaBimApp {
                 }
                 "clean" => info.pad.retain(|i| !(i.todo && i.done)),
                 ext => {
-                    let stem = std::path::Path::new(&self.path)
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("project")
-                        .to_string();
+                    let stem = stem(&self.path);
                     if let Some(path) = self.export_to(format!("{stem} notes.{ext}")) {
                         self.status = match std::fs::write(&path, &md) {
                             Ok(()) => format!("Saved the notes to {path}."),
@@ -7683,6 +7740,7 @@ impl CreaBimApp {
             self.status = why.clone();
             return;
         }
+        let r_source_dxf = matches!(source, creabim_core::RefSource::Dxf { .. });
         let mut r = creabim_core::Reference::new(source, vec![v]);
         if let Some(b) = crate::trace::bounds_of(&r.source, &shown) {
             r.in_place(b);
@@ -7704,6 +7762,12 @@ impl CreaBimApp {
             self.selection.only(id);
             self.prop_tab = PropTab::Element;
             self.status = "Reference added. Drag its middle to move it, a corner to scale it, the round grip to turn it; Calibrate sets an exact size. Alt+F2 hides it.".into();
+            if r_source_dxf && crate::trace::DXF_CAPPED.load(std::sync::atomic::Ordering::Relaxed) {
+                self.status = format!(
+                    "Reference added, but only in part: the file makes more than {} items (blocks in arrays inside arrays), so reading stopped there.",
+                    creabim_exchange::titleblock::MAX_ITEMS
+                );
+            }
         }
     }
 
@@ -8461,6 +8525,15 @@ impl CreaBimApp {
             self.crop_pick_banner(ui);
         }
         let tab = self.prop_tab;
+        // a master, a profile or the log: not the element picked before
+        if tab.of_its_view() {
+            match tab {
+                PropTab::Profile => self.profile_props(ui),
+                PropTab::Master => self.master_props(ui),
+                _ => self.log_props(ui),
+            }
+            return;
+        }
         let Some(id) = self.selection.active else {
             if tab == PropTab::Next {
                 self.next_element_panel(ui);
@@ -8472,18 +8545,6 @@ impl CreaBimApp {
             }
             if tab == PropTab::Notes {
                 self.notes_pad(ui);
-                return;
-            }
-            if tab == PropTab::Profile {
-                self.profile_props(ui);
-                return;
-            }
-            if tab == PropTab::Master {
-                self.master_props(ui);
-                return;
-            }
-            if tab == PropTab::Log {
-                self.log_props(ui);
                 return;
             }
             if tab == PropTab::Model3d {
@@ -10114,7 +10175,11 @@ impl CreaBimApp {
     /// The top of Properties, pinned while its tabs scroll (MU19/MU20):
     /// what the selected element is, its name and mark, and its actions.
     fn properties_header(&mut self, ui: &mut egui::Ui) {
-        let Some(id) = self.selection.active else {
+        let picked = self
+            .selection
+            .active
+            .filter(|_| !self.prop_tab.of_its_view());
+        let Some(id) = picked else {
             // the open tab's name, as Blender's context line
             crate::props::flow(ui, |ui| {
                 let p = crate::theme::Palette::of(ui.ctx());
@@ -10813,6 +10878,12 @@ pub(crate) enum PropTab {
 }
 
 impl PropTab {
+    /// A tab of the view in front (a master, a profile, the log): it shows
+    /// what that view edits, whatever is picked in the model.
+    pub(crate) fn of_its_view(self) -> bool {
+        matches!(self, PropTab::Master | PropTab::Profile | PropTab::Log)
+    }
+
     /// The strip's groups, a hairline apart: what is selected, the view,
     /// the whole project.
     fn group(self) -> u8 {
@@ -10983,6 +11054,27 @@ impl eframe::App for CreaBimApp {
             self.close_ask = true;
         }
         let ctx = ui.ctx().clone();
+        // on the drawing area a bar's tooltip goes: the bar never hears the
+        // pointer leave it. Back from a bar (or after a pause in the moves
+        // here, in case leaving went unreported) the bars forget the
+        // button they last showed, so it shows again on the next hover
+        let (events, now) = ctx.input(|i| (i.events.clone(), i.time));
+        for e in events {
+            match e {
+                egui::Event::PointerGone => self.pointer_away = true,
+                egui::Event::PointerMoved(_) => {
+                    self.shell.drop_web_tip();
+                    if self.pointer_away || now - self.pointer_seen > TIP_PAUSE {
+                        if let Some(web) = &self.shell.web {
+                            web.run_all("window.CB && CB.away && CB.away()");
+                        }
+                    }
+                    self.pointer_away = false;
+                    self.pointer_seen = now;
+                }
+                _ => {}
+            }
+        }
         crate::trace::hold(ctx.input(|i| i.pointer.any_down()));
         let m = ctx.input(|i| i.modifiers);
         shell::MODS.store(
@@ -11594,12 +11686,167 @@ fn face_triangles(mesh: &creabim_core::EditMesh, face: usize) -> std::ops::Range
     start..start + len
 }
 
+/// The project's name without its ending, to name what is exported from
+/// it. Only the ending goes (and `.creabim` before `.json`): a name with
+/// dots of its own, as `House-1.1.1-test.creabim`, keeps them, where
+/// cutting at the first dot suggested `House-1.ifc` (discussion 17).
 fn stem(path: &str) -> String {
     let name = std::path::Path::new(path)
-        .file_name()
+        .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    name.split('.').next().unwrap_or("project").to_string()
+    let name = match name.len().checked_sub(".creabim".len()) {
+        Some(at)
+            if at > 0
+                && name.is_char_boundary(at)
+                && name[at..].eq_ignore_ascii_case(".creabim") =>
+        {
+            name[..at].to_string()
+        }
+        _ => name,
+    };
+    if name.is_empty() {
+        "project".to_string()
+    } else {
+        name
+    }
+}
+
+#[cfg(test)]
+mod face_plane_tests {
+    /// An element drawn as several items (a terrain is) crashed the app
+    /// when a face of a later item was picked: the triangle was looked up
+    /// in the element's first item (issue 22).
+    #[test]
+    fn a_face_of_an_elements_second_item_gives_its_plane() {
+        let model = creabim_core::sample::sample_house();
+        let scene = creabim_geom::build_scene(&model);
+        let slab = scene
+            .iter()
+            .find(|i| model.get(i.id).is_some_and(|e| e.name == "FF Slab"))
+            .unwrap();
+        let mut small = slab.clone();
+        small.mesh.indices.truncate(3);
+        for p in &mut small.mesh.positions {
+            p[0] += 500.0;
+        }
+        let scene = vec![small, slab.clone()];
+        let o = glam::DVec3::new(5.0, 3.0, 50.0);
+        let plane = super::face_plane(&scene, o, -glam::DVec3::Z).expect("the slab's top");
+        assert!((plane.origin.z - 3.0).abs() < 1e-3, "{}", plane.origin);
+    }
+
+    /// The report itself: a terrain added to the starter house, then the
+    /// pointer anywhere over it in 3D.
+    #[test]
+    fn the_starter_house_on_a_terrain_gives_a_plane_under_any_ray() {
+        use creabim_core::{Element, ElementKind};
+        let house = creabim_core::starter::starter_house();
+        let level = house
+            .iter()
+            .find(|e| matches!(e.kind, ElementKind::Level(_)))
+            .unwrap()
+            .id;
+        let mut site = creabim_core::site::Site::terrain(
+            level,
+            creabim_core::polygon::rectangle(
+                glam::DVec2::new(-20.0, -20.0),
+                glam::DVec2::new(40.0, 40.0),
+            ),
+            0.0,
+            0.5,
+        );
+        if let creabim_core::site::SiteForm::Terrain { points, .. } = &mut site.form {
+            points.push(glam::DVec3::new(-10.0, -10.0, 2.0));
+        }
+        let ground = Element::new("Ground", ElementKind::Site(site));
+        let model =
+            creabim_core::Model::from_elements(house.iter().cloned().chain([ground])).unwrap();
+        let scene = creabim_geom::build_scene(&model);
+        // (this plain terrain is one item; the elements with several are
+        // the ones a triangle could be looked up wrongly in)
+        let mut several: Vec<String> = Vec::new();
+        for e in model.iter() {
+            let n = scene.iter().filter(|i| i.id == e.id).count();
+            if n > 1 {
+                several.push(format!("{} x{n}", e.name));
+            }
+        }
+        assert!(
+            !several.is_empty(),
+            "nothing here could be looked up wrongly"
+        );
+        let mut planes = 0;
+        for x in (-19..40).step_by(4) {
+            for y in (-19..40).step_by(4) {
+                let o = glam::DVec3::new(x as f64 + 0.37, y as f64 + 0.41, 80.0);
+                for d in [
+                    -glam::DVec3::Z,
+                    glam::DVec3::new(0.3, 0.2, -1.0).normalize(),
+                ] {
+                    planes += super::face_plane(&scene, o, d).is_some() as usize;
+                }
+            }
+        }
+        assert!(planes > 200, "{planes}");
+
+        // Aim at the triangles that crashed: in an item after the first of
+        // its element (furniture is one item per part), at an index past
+        // the end of that first item's mesh. Each ray starts just off the
+        // triangle, so it is what the ray meets first.
+        let mut aimed = 0;
+        for (at, item) in scene.iter().enumerate() {
+            let Some(first) = scene.iter().position(|s| s.id == item.id) else {
+                continue;
+            };
+            if first == at {
+                continue;
+            }
+            let past = scene[first].mesh.triangle_count();
+            let count = item.mesh.triangle_count();
+            // a few per item: each ray tests the whole scene
+            let step = (count.saturating_sub(past) / 3).max(1);
+            for tri in (past..count).step_by(step) {
+                let idx = &item.mesh.indices[tri * 3..tri * 3 + 3];
+                let v =
+                    |k: usize| glam::Vec3::from(item.mesh.positions[idx[k] as usize]).as_dvec3();
+                let n = (v(1) - v(0)).cross(v(2) - v(0));
+                if n.length() < 1e-6 {
+                    continue;
+                }
+                let n = n.normalize();
+                let c = (v(0) + v(1) + v(2)) / 3.0;
+                let plane = super::face_plane(&scene, c + n * 1e-3, -n);
+                assert!(plane.is_some(), "{} item {at} triangle {tri}", item.id.0);
+                aimed += 1;
+            }
+        }
+        assert!(
+            aimed > 0,
+            "no triangle past the end of its element's first item"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stem_tests {
+    use super::{stem, with_extension};
+
+    #[test]
+    fn an_export_keeps_the_dots_of_the_projects_name() {
+        assert_eq!(stem("CreaBIM-1.1.1-test.creabim"), "CreaBIM-1.1.1-test");
+        assert_eq!(stem("house.creabim"), "house");
+        assert_eq!(stem("house.creabim.json"), "house");
+        assert_eq!(stem("house v2.1.CREABIM.json"), "house v2.1");
+        assert_eq!(stem("from revit 2.4.ifc"), "from revit 2.4");
+        assert_eq!(stem("untitled"), "untitled");
+        assert_eq!(stem(""), "project");
+        let out = with_extension("C:/work/CreaBIM-1.1.1-test.creabim", "ifc");
+        assert!(out.ends_with("CreaBIM-1.1.1-test.ifc"), "{out}");
+        // a sheet's or schedule's own name still goes after the project's
+        let out = with_extension("C:/work/a.b.creabim", "A-101.svg");
+        assert!(out.ends_with("a.b.A-101.svg"), "{out}");
+    }
 }
 
 fn with_extension(path: &str, ext: &str) -> String {
@@ -11740,8 +11987,10 @@ const GUIDE_REACH_3D: f64 = 60.0;
 /// The plane of the face a ray hits, facing back along the ray.
 fn face_plane(scene: &[creabim_geom::SceneItem], o: DVec3, d: DVec3) -> Option<Workplane> {
     let h = pick::pick(scene, o.as_vec3(), d.as_vec3())?;
-    let item = scene.iter().find(|s| s.id == h.id)?;
-    let idx = &item.mesh.indices[h.triangle * 3..h.triangle * 3 + 3];
+    // the item hit, not the first of its element: a terrain is several
+    // items, and a triangle of one is past the end of another (issue 22)
+    let item = scene.get(h.item)?;
+    let idx = item.mesh.indices.get(h.triangle * 3..h.triangle * 3 + 3)?;
     let v = |k: usize| glam::Vec3::from(item.mesh.positions[idx[k] as usize]);
     let mut n = (v(1) - v(0))
         .cross(v(2) - v(0))

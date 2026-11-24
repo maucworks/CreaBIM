@@ -93,14 +93,69 @@ jobs:
           cp LICENSE README.md "$name/"
           cp docs/RELEASE_README.txt "$name/READ ME FIRST.txt"
           tar czf "$name.tar.gz" "$name"
+      - name: Debian package
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          DATE: ${{ needs.meta.outputs.date }}
+        run: |
+          bash packaging/linux/make-deb.sh "$VERSION" "$DATE" target/release \
+            "CreaBIM-${VERSION}-${DATE}-linux-x64.deb"
+      - name: RPM package
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          DATE: ${{ needs.meta.outputs.date }}
+        run: |
+          sudo apt-get install -y rpm
+          bash packaging/linux/make-rpm.sh "$VERSION" "$DATE" target/release \
+            "CreaBIM-${VERSION}-${DATE}-linux-x64.rpm"
       - uses: actions/upload-artifact@v4
         with:
           name: linux
-          path: CreaBIM-*.tar.gz
+          path: |
+            CreaBIM-*.tar.gz
+            CreaBIM-*.deb
+            CreaBIM-*.rpm
+
+  macos:
+    name: macOS (universal)
+    needs: meta
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin, aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build universal binaries
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          cargo build --release --target x86_64-apple-darwin -p creabim-app -p creabim-cli
+          cargo build --release --target aarch64-apple-darwin -p creabim-app -p creabim-cli
+          mkdir -p target/release-macos-universal
+          lipo -create target/x86_64-apple-darwin/release/creabim-app \
+            target/aarch64-apple-darwin/release/creabim-app \
+            -output target/release-macos-universal/creabim-app
+          lipo -create target/x86_64-apple-darwin/release/creabim \
+            target/aarch64-apple-darwin/release/creabim \
+            -output target/release-macos-universal/creabim
+      - name: Create disk image
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          DATE: ${{ needs.meta.outputs.date }}
+        run: |
+          bash packaging/macos/make-dmg.sh "$VERSION" "$DATE" target/release-macos-universal \
+            "CreaBIM-${VERSION}-${DATE}-macos-universal.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: CreaBIM-*.dmg
 
   publish:
     name: Draft the release
-    needs: [meta, windows, linux]
+    needs: [meta, windows, linux, macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -121,7 +176,10 @@ jobs:
 
           ## Downloads
           - **Windows:** run the \`-setup.exe\` to install (no administrator rights needed; uninstall from Settings › Apps), or unzip the \`.zip\` and run \`CreaBIM.exe\`. If Windows warns about an unknown publisher, choose *More info*, then *Run anyway*.
-          - **Linux:** untar and run \`./creabim\` (needs WebKitGTK 4.1 and GTK 3).
+          - **Ubuntu:** install the \`.deb\` with \`sudo apt install ./CreaBIM-*-linux-x64.deb\`; launch CreaBIM from your applications menu.
+          - **Fedora and RHEL 10** (glibc 2.35 or later; not RHEL 9): install the \`.rpm\` with \`sudo dnf install ./CreaBIM-*-linux-x64.rpm\`; launch CreaBIM from your applications menu.
+          - **Other Linux distributions:** untar the \`.tar.gz\` and run \`./creabim\` (needs WebKitGTK 4.1 and GTK 3).
+          - **macOS:** open the universal \`.dmg\` and drag CreaBIM to Applications. The app isn't code-signed or notarized yet, so the first time macOS refuses to open it: open *System Settings › Privacy & Security* and choose *Open Anyway*.
           - Check a download against \`SHA256SUMS.txt\`.
 
           ## Status

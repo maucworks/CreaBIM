@@ -410,11 +410,9 @@ fn info(path: &str) -> SheetInfo {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     SheetInfo {
-        project: name
-            .split('.')
-            .next()
-            .unwrap_or("CreaBIM project")
-            .to_string(),
+        // the name without its ending: one with dots of its own keeps
+        // them (`House-1.1.1.creabim` was `House-1` on its sheets)
+        project: project_name(&name),
         date: creabim_geom::sheet::today(),
     }
 }
@@ -579,4 +577,33 @@ fn load(path: &str) -> Result<Model, String> {
     creabim_store::load(path)
         .map(|doc| doc.into_parts().0)
         .map_err(|e| format!("{path}: {e}"))
+}
+
+/// A project file's name without its ending (`.creabim`, `.creabim.json`
+/// or any other one ending).
+fn project_name(file: &str) -> String {
+    let lower = file.to_ascii_lowercase();
+    let cut = [".creabim.json", ".creabim"]
+        .iter()
+        .find(|e| lower.ends_with(**e))
+        .map(|e| file.len() - e.len())
+        .or_else(|| file.rfind('.'))
+        .filter(|at| *at > 0)
+        .unwrap_or(file.len());
+    match &file[..cut] {
+        "" => "CreaBIM project".to_string(),
+        name => name.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod project_name_tests {
+    #[test]
+    fn a_projects_name_keeps_its_own_dots() {
+        assert_eq!(super::project_name("House-1.1.1.creabim"), "House-1.1.1");
+        assert_eq!(super::project_name("house.creabim.json"), "house");
+        assert_eq!(super::project_name("house.ifc"), "house");
+        assert_eq!(super::project_name("house"), "house");
+        assert_eq!(super::project_name(""), "CreaBIM project");
+    }
 }

@@ -1,0 +1,72 @@
+name: Something went wrong
+description: A crash, an error, something that looks wrong or a tool that doesn't do what it should.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time to report this. Every report helps make CreaBIM better.
+
+        **The quickest way:** in CreaBIM, choose **Help › Report a problem…**. It saves one `.zip` with your CreaBIM version, your system and graphics card, and the app's log. Nothing is sent anywhere by the app. It asks whether to include your project; you can say no. Then drag that `.zip` into the box at the bottom of this form.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you saw, and what you expected instead.
+      placeholder: "The second icon bar is hidden behind the panels below it. I expected to see the tool's options."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: How can I see it too?
+      description: The steps that lead to it, one per line. "It happens all the time" is fine too.
+      placeholder: |
+        1. Open the starter house
+        2. Pick the Wall tool
+        3. ...
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: CreaBIM version
+      description: In Help › About CreaBIM, for example "1.1.2".
+      placeholder: "1.1.2"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: system
+    attributes:
+      label: System
+      options:
+        - Windows 11
+        - Windows 10
+        - Linux
+        - macOS
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: screen
+    attributes:
+      label: Screen and display scaling
+      description: Helps with anything that looks wrong. On Windows, right-click the desktop › Display settings › Scale.
+      placeholder: "3840 × 2160, 150%, one monitor"
+    validations:
+      required: false
+
+  - type: textarea
+    id: files
+    attributes:
+      label: Report, screenshots and files
+      description: Drag the `.zip` from **Help › Report a problem…** here, and a screenshot if something looks wrong (Windows key + Shift + S takes one).
+      placeholder: Drag files here.
+    validations:
+      required: false

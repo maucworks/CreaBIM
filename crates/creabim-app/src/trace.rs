@@ -20,6 +20,9 @@ use std::sync::Arc;
 /// Set each frame: true while a pointer button is down, so drags reuse
 /// what the references showed instead of reading their views again.
 static HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Did the last DXF read stop at the file's item budget, leaving part of
+/// it out? (Told in the status when the reference is added.)
+pub static DXF_CAPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Hold (or release) the references' read drawings; see [`RefCache::get`].
 /// Is a pointer button down (a drag anywhere)?
@@ -263,8 +266,13 @@ pub fn picture(path: &str) -> Result<Raster, String> {
 
 /// A DXF file's lines, in metres.
 pub fn dxf_lines(path: &str) -> Result<Vec<Vec<DVec2>>, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("couldn't read {path}: {e}"))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("couldn't read {path}: {e}"))?;
+    let text = creabim_exchange::titleblock::dxf_text(&bytes);
     let items = creabim_exchange::titleblock::dxf_items(&text)?;
+    DXF_CAPPED.store(
+        creabim_exchange::titleblock::dxf_capped(&items),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     Ok(items
         .into_iter()
         .filter_map(|it| match it {

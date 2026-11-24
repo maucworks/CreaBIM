@@ -2543,23 +2543,72 @@ pub fn duplicate(doc: &mut Document, ids: &[ElementId]) -> Result<Vec<ElementId>
         // one element: a lone door's copy goes beside it on its wall
         transform::duplicate(model, *one)
     } else {
-        let set = transform::copy_set(model, ids);
-        let elements: Vec<Element> = set
-            .iter()
-            .filter_map(|id| model.get(*id))
-            .cloned()
-            .collect();
-        let (mut copies, _) = transform::fresh_copies(model, &elements);
-        for (c, o) in copies.iter_mut().zip(&elements) {
-            if ids.contains(&o.id) {
-                c.name = format!("{} copy", c.name);
-            }
-        }
-        copies
+        copies_of_set(doc, ids)
     };
     if copies.is_empty() {
         return Err("That can't be duplicated.".into());
     }
+    insert_copies(doc, copies)
+}
+
+/// Copies of `ids` as copy and paste makes them (with what hangs on them),
+/// the picked ones named "… copy".
+fn copies_of_set(doc: &Document, ids: &[ElementId]) -> Vec<Element> {
+    let model = doc.model();
+    let set = transform::copy_set(model, ids);
+    let elements: Vec<Element> = set
+        .iter()
+        .filter_map(|id| model.get(*id))
+        .cloned()
+        .collect();
+    let (mut copies, _) = transform::fresh_copies(model, &elements);
+    for (c, o) in copies.iter_mut().zip(&elements) {
+        if ids.contains(&o.id) {
+            c.name = format!("{} copy", c.name);
+        }
+    }
+    copies
+}
+
+/// Copies of views, made at once: a view has no place in a drawing to
+/// follow the pointer to, so Duplicate on views works like copy and paste.
+/// `None` when `ids` aren't all views.
+pub fn duplicate_views(
+    doc: &mut Document,
+    ids: &[ElementId],
+) -> Option<Result<Vec<ElementId>, String>> {
+    let model = doc.model();
+    let views = !ids.is_empty()
+        && ids.iter().all(|id| {
+            model
+                .get(*id)
+                .is_some_and(|e| matches!(e.kind, ElementKind::View(_)))
+        });
+    if !views {
+        return None;
+    }
+    let copies = copies_of_set(doc, ids);
+    if copies.is_empty() {
+        return Some(Err("That can't be duplicated.".into()));
+    }
+    Some(insert_copies(doc, copies))
+}
+
+/// What the status line says after `duplicate_views`.
+pub fn views_duplicated(doc: &Document, copies: &[ElementId]) -> String {
+    let names: Vec<&str> = copies
+        .iter()
+        .filter_map(|id| doc.model().get(*id))
+        .map(|e| e.name.as_str())
+        .collect();
+    match names.as_slice() {
+        [one] => format!("Duplicated the view as {one}."),
+        _ => format!("Duplicated {} views.", names.len()),
+    }
+}
+
+/// Insert `copies` as one undo step; returns their ids.
+fn insert_copies(doc: &mut Document, copies: Vec<Element>) -> Result<Vec<ElementId>, String> {
     let name = match copies.len() {
         1 => copies[0].name.clone(),
         n => format!("{n} elements"),
@@ -2940,6 +2989,36 @@ mod tests {
         // still on the face, its x axis now pointing up it
         assert!((q.normal() + DVec3::Y).length() < 1e-9);
         assert!((q.x - DVec3::Z).length() < 1e-9, "{}", q.x);
+    }
+
+    #[test]
+    fn duplicating_a_view_copies_it_at_once() {
+        // #35: Duplicate on a view did nothing ("That can't be duplicated.")
+        let mut doc = Document::from_model(sample_house());
+        let view = doc
+            .model()
+            .iter()
+            .find(|e| e.name == "First Floor plan")
+            .map(|e| e.id)
+            .unwrap();
+        let steps = doc.undo_steps().len();
+        let copies = duplicate_views(&mut doc, &[view]).unwrap().unwrap();
+        assert_eq!(copies.len(), 1);
+        let (orig, copy) = (
+            doc.model().get(view).unwrap(),
+            doc.model().get(copies[0]).unwrap(),
+        );
+        assert_eq!(copy.name, "First Floor plan copy");
+        assert_eq!(
+            serde_json::to_value(&copy.kind).unwrap(),
+            serde_json::to_value(&orig.kind).unwrap(),
+            "the same settings"
+        );
+        assert_eq!(doc.undo_steps().len(), steps + 1, "one undo step");
+        // anything but views keeps the copy that follows the pointer
+        let (wall, _) = first_wall(&doc);
+        assert!(duplicate_views(&mut doc, &[wall]).is_none());
+        assert!(duplicate_views(&mut doc, &[view, wall]).is_none());
     }
 
     #[test]
