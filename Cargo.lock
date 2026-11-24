@@ -977,7 +977,7 @@ dependencies = [
 
 [[package]]
 name = "creabim-nurbs"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "geometrykit-core",
  "glam",
@@ -986,7 +986,7 @@ dependencies = [
 
 [[package]]
 name = "creabim-provision"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "flate2",
  "sha2",
@@ -997,7 +997,7 @@ dependencies = [
 
 [[package]]
 name = "creabim-script"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "creabim-core",
  "creabim-provision",
